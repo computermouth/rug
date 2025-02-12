@@ -1,0 +1,10 @@
+[package]
+name = "rug"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+glib = "0.20.7"
+gtk4 = "0.9.5"
+webkit2gtk = "2.0.1"
+webkit6 = "0.4.0"
