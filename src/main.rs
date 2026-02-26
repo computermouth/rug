@@ -4,8 +4,63 @@ use webkit6::prelude::*;
 use webkit6::WebView;
 use gtk4::{Application, ApplicationWindow, Box as GtkBox, Image, Label, Notebook, Orientation, Entry, Button, ProgressBar};
 use glib::clone;
+use std::cell::RefCell;
 
 mod html;
+
+thread_local! {
+    static RECENT_PAGES: RefCell<Vec<(String, String)>> = RefCell::new(Vec::new());
+}
+
+fn update_recent(url: &str, title: &str) {
+    if url.is_empty() || url.starts_with("about:") || url.starts_with("rug:") { return; }
+    RECENT_PAGES.with(|rp| {
+        let mut pages = rp.borrow_mut();
+        if let Some(pos) = pages.iter().position(|(u, _)| u == url) {
+            let (u, old_title) = pages.remove(pos);
+            let t = if title.is_empty() { old_title } else { title.to_string() };
+            pages.insert(0, (u, t));
+        } else {
+            let t = if title.is_empty() { url.to_string() } else { title.to_string() };
+            pages.insert(0, (url.to_string(), t));
+        }
+        pages.truncate(8);
+    });
+    save_recent();
+}
+
+fn recent_pages_snapshot() -> Vec<(String, String)> {
+    RECENT_PAGES.with(|rp| rp.borrow().clone())
+}
+
+fn data_path() -> std::path::PathBuf {
+    #[cfg(debug_assertions)]
+    { std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target").join("rug_data.json") }
+    #[cfg(not(debug_assertions))]
+    { glib::home_dir().join(".local").join("share").join("rug").join("data.json") }
+}
+
+fn save_recent() {
+    RECENT_PAGES.with(|rp| {
+        let pages = rp.borrow();
+        let path = data_path();
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(json) = serde_json::to_string(&*pages) {
+            let _ = std::fs::write(path, json);
+        }
+    });
+}
+
+fn load_recent() {
+    let path = data_path();
+    if let Ok(content) = std::fs::read_to_string(path) {
+        if let Ok(pages) = serde_json::from_str::<Vec<(String, String)>>(&content) {
+            RECENT_PAGES.with(|rp| *rp.borrow_mut() = pages);
+        }
+    }
+}
 
 fn is_active_tab(notebook: &Notebook, webview: &WebView) -> bool {
     notebook.page_num(webview) == notebook.current_page()
@@ -35,7 +90,7 @@ fn add_tab(
 
     match initial_uri {
         Some(uri) => webview.load_uri(uri),
-        None if related_view.is_none() => webview.load_html(html::HOME, None),
+        None if related_view.is_none() => webview.load_uri("rug://home"),
         _ => {}
     }
 
@@ -46,6 +101,11 @@ fn add_tab(
         #[weak] notebook, #[weak] back_button, #[weak] forward_button,
         #[weak] webview, #[weak] url_bar, #[weak] progress_bar,
         move |_, load_event| {
+            if load_event == webkit6::LoadEvent::Finished {
+                let uri = webview.uri().unwrap_or_default();
+                let title = webview.title().unwrap_or_default();
+                update_recent(&uri, &title);
+            }
             if !is_active_tab(&notebook, &webview) { return; }
             back_button.set_sensitive(webview.can_go_back());
             forward_button.set_sensitive(webview.can_go_forward());
@@ -179,6 +239,8 @@ fn add_tab(
         clone!(#[weak] title_label, #[weak] webview, move |_, _| {
             let title = webview.title().unwrap_or_default();
             title_label.set_text(if title.is_empty() { "New Tab" } else { &title });
+            let uri = webview.uri().unwrap_or_default();
+            update_recent(&uri, &title);
         }),
     );
 
@@ -302,13 +364,16 @@ fn create_browser_window(app: &Application, related_view: Option<&WebView>) -> W
     let webview = add_tab(&notebook, &window, &url_bar, &back_button, &forward_button, &progress_bar, app, related_view, None);
 
     let ev_ctrl = gtk4::EventControllerKey::new();
-    ev_ctrl.connect_key_pressed(|_, key, _, _| {
+    ev_ctrl.connect_key_pressed(clone!(#[strong] notebook, move |_, key, _, _| {
         match key {
             Key::Escape => { std::process::exit(0); }
+            Key::F5 => {
+                if let Some(wv) = current_webview(&notebook) { wv.reload(); }
+            }
             _ => (),
         }
         glib::Propagation::Proceed
-    });
+    }));
 
     url_box.append(&back_button);
     url_box.append(&forward_button);
@@ -334,7 +399,18 @@ fn main() {
         .build();
 
     app.connect_activate(|app| {
+        load_recent();
         let webview = create_browser_window(app, None);
+
+        webview.web_context().unwrap().register_uri_scheme("rug", |request| {
+            let html = match request.uri().unwrap_or_default().as_str() {
+                "rug://home" => html::home(&recent_pages_snapshot()),
+                _ => String::from("<!DOCTYPE html><html><body>Not found</body></html>"),
+            };
+            let bytes = glib::Bytes::from(html.as_bytes());
+            let stream = gtk4::gio::MemoryInputStream::from_bytes(&bytes);
+            request.finish(&stream, bytes.len() as i64, Some("text/html"));
+        });
 
         let session = webview.network_session().unwrap();
         session.website_data_manager().unwrap().set_favicons_enabled(true);
