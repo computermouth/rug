@@ -2,7 +2,7 @@ use gtk4::prelude::*;
 use gtk4::gdk::Key;
 use webkit6::prelude::*;
 use webkit6::WebView;
-use gtk4::{Application, ApplicationWindow, Box as GtkBox, Image, Label, ListBox, Notebook, Orientation, Entry, Button, Popover, ProgressBar, ScrolledWindow};
+use gtk4::{Application, ApplicationWindow, Box as GtkBox, Image, Label, ListBox, Notebook, Orientation, Entry, Button, Overlay, ProgressBar};
 use glib::clone;
 use std::cell::RefCell;
 
@@ -12,9 +12,16 @@ thread_local! {
     static RECENT_PAGES: RefCell<Vec<(String, String, Option<String>)>> = RefCell::new(Vec::new());
     static FAVICON_CACHE: RefCell<std::collections::HashMap<String, gtk4::gdk::Texture>> =
         RefCell::new(std::collections::HashMap::new());
+    static SEARCH_ENGINE: RefCell<String> = RefCell::new("ddg".to_string());
+    static CUSTOM_SEARCH_URL: RefCell<String> = RefCell::new(String::new());
+    static DARK_MODE: RefCell<bool> = RefCell::new(false);
+    static CACHE_ENABLED: RefCell<bool> = RefCell::new(true);
+    static NETWORK_SESSION: RefCell<Option<webkit6::NetworkSession>> = RefCell::new(None);
+    static PRIVATE: RefCell<bool> = RefCell::new(false);
 }
 
 fn update_recent(url: &str, title: &str) {
+    if PRIVATE.with(|i| *i.borrow()) { return; }
     if url.is_empty() || url.starts_with("about:") || url.starts_with("rug:") { return; }
     RECENT_PAGES.with(|rp| {
         let mut pages = rp.borrow_mut();
@@ -32,6 +39,7 @@ fn update_recent(url: &str, title: &str) {
 }
 
 fn update_recent_favicon(url: &str, texture: &gtk4::gdk::Texture) {
+    if PRIVATE.with(|i| *i.borrow()) { return; }
     if url.is_empty() || url.starts_with("about:") || url.starts_with("rug:") { return; }
     let data_uri = texture_to_data_uri(texture);
     RECENT_PAGES.with(|rp| {
@@ -48,11 +56,131 @@ fn recent_pages_snapshot() -> Vec<(String, String, Option<String>)> {
     RECENT_PAGES.with(|rp| rp.borrow().clone())
 }
 
+fn url_decode(s: &str) -> String {
+    let mut result = Vec::new();
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => { result.push(b' '); i += 1; }
+            b'%' if i + 2 < bytes.len() => {
+                let hi = (bytes[i + 1] as char).to_digit(16);
+                let lo = (bytes[i + 2] as char).to_digit(16);
+                if let (Some(h), Some(l)) = (hi, lo) {
+                    result.push((h * 16 + l) as u8);
+                    i += 3;
+                } else {
+                    result.push(b'%'); i += 1;
+                }
+            }
+            b => { result.push(b); i += 1; }
+        }
+    }
+    String::from_utf8_lossy(&result).into_owned()
+}
+
+fn parse_query_params(uri: &str) -> std::collections::HashMap<String, String> {
+    let mut map = std::collections::HashMap::new();
+    if let Some(q) = uri.splitn(2, '?').nth(1) {
+        for pair in q.split('&') {
+            if let Some((k, v)) = pair.split_once('=') {
+                map.insert(url_decode(k), url_decode(v));
+            }
+        }
+    }
+    map
+}
+
 fn data_path() -> std::path::PathBuf {
     #[cfg(debug_assertions)]
-    { std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target").join("rug_data.json") }
+    { std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target").join("tmp").join("data.json") }
     #[cfg(not(debug_assertions))]
     { glib::home_dir().join(".local").join("share").join("rug").join("data.json") }
+}
+
+fn settings_path() -> std::path::PathBuf {
+    #[cfg(debug_assertions)]
+    { std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target").join("tmp").join("settings.json") }
+    #[cfg(not(debug_assertions))]
+    { glib::home_dir().join(".config").join("rug").join("settings.json") }
+}
+
+fn wk_cache_path() -> std::path::PathBuf {
+    #[cfg(debug_assertions)]
+    { std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/tmp/wk_cache") }
+    #[cfg(not(debug_assertions))]
+    { glib::home_dir().join(".cache/rug") }
+}
+
+fn cookies_path() -> std::path::PathBuf {
+    #[cfg(debug_assertions)]
+    { std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/tmp/wk_data/cookies.sqlite") }
+    #[cfg(not(debug_assertions))]
+    { glib::home_dir().join(".local/share/rug/cookies.sqlite") }
+}
+
+fn clear_cache() {
+    let path = wk_cache_path();
+    let _ = std::fs::remove_dir_all(&path);
+    let _ = std::fs::create_dir_all(&path);
+}
+
+fn clear_cookies() {
+    let _ = std::fs::remove_file(cookies_path());
+}
+
+fn apply_dark_mode(dark: bool) {
+    if let Some(s) = gtk4::Settings::default() {
+        s.set_gtk_application_prefer_dark_theme(dark);
+    }
+}
+
+fn save_settings() {
+    let engine = SEARCH_ENGINE.with(|e| e.borrow().clone());
+    let custom_url = CUSTOM_SEARCH_URL.with(|u| u.borrow().clone());
+    let dark = DARK_MODE.with(|d| *d.borrow());
+    let cache = CACHE_ENABLED.with(|c| *c.borrow());
+    let path = settings_path();
+    if let Some(parent) = path.parent() { let _ = std::fs::create_dir_all(parent); }
+    if let (Ok(e), Ok(u)) = (serde_json::to_string(&engine), serde_json::to_string(&custom_url)) {
+        let _ = std::fs::write(path, format!(
+            "{{\"engine\":{},\"custom_url\":{},\"dark\":{},\"cache\":{}}}",
+            e, u, dark, cache
+        ));
+    }
+}
+
+fn load_settings() {
+    let path = settings_path();
+    if let Ok(content) = std::fs::read_to_string(path) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
+            if let Some(e) = v["engine"].as_str() {
+                SEARCH_ENGINE.with(|s| *s.borrow_mut() = e.to_string());
+            }
+            if let Some(u) = v["custom_url"].as_str() {
+                CUSTOM_SEARCH_URL.with(|s| *s.borrow_mut() = u.to_string());
+            }
+            if let Some(d) = v["dark"].as_bool() {
+                DARK_MODE.with(|s| *s.borrow_mut() = d);
+            }
+            if let Some(c) = v["cache"].as_bool() {
+                CACHE_ENABLED.with(|s| *s.borrow_mut() = c);
+            }
+        }
+    }
+}
+
+fn search_url(query: &str) -> String {
+    let engine = SEARCH_ENGINE.with(|e| e.borrow().clone());
+    match engine.as_str() {
+        "google" => format!("https://www.google.com/search?q={}", url_encode(query)),
+        "bing"   => format!("https://www.bing.com/search?q={}", url_encode(query)),
+        "custom" => {
+            let base = CUSTOM_SEARCH_URL.with(|u| u.borrow().clone());
+            format!("{}{}", base, url_encode(query))
+        }
+        _ => format!("https://duckduckgo.com/?q={}", url_encode(query)),
+    }
 }
 
 fn save_recent() {
@@ -119,7 +247,7 @@ fn smart_uri(input: &str) -> String {
     if s.contains(' ')
         || (!s.contains('.') && !s.starts_with("localhost"))
     {
-        return format!("https://duckduckgo.com/?q={}", url_encode(s));
+        return search_url(s);
     }
     format!("http://{}", s)
 }
@@ -177,6 +305,23 @@ fn default_favicon() -> gtk4::gdk::Texture {
         .upcast()
 }
 
+fn highlight_match(text: &str, query: &str) -> String {
+    let lower = text.to_lowercase();
+    let q = query.to_lowercase();
+    if let Some(start) = lower.find(&q) {
+        let end = start + q.len();
+        if text.is_char_boundary(start) && text.is_char_boundary(end) {
+            return format!(
+                "{}<b>{}</b>{}",
+                pango_esc(&text[..start]),
+                pango_esc(&text[start..end]),
+                pango_esc(&text[end..])
+            );
+        }
+    }
+    pango_esc(text)
+}
+
 fn pango_esc(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
@@ -217,7 +362,10 @@ fn add_tab(
 ) -> WebView {
     let webview = match related_view {
         Some(rv) => webkit6::WebView::builder().related_view(rv).build(),
-        None => WebView::new(),
+        None => NETWORK_SESSION.with(|s| match s.borrow().as_ref() {
+            Some(ns) => webkit6::WebView::builder().network_session(ns).build(),
+            None => WebView::new(),
+        }),
     };
 
     match initial_uri {
@@ -357,6 +505,9 @@ fn add_tab(
     let favicon_img = Image::new();
     favicon_img.set_pixel_size(16);
     favicon_img.set_paintable(Some(&default_favicon()));
+    if PRIVATE.with(|p| *p.borrow()) {
+        favicon_img.add_css_class("private-favicon");
+    }
     let title_label = Label::new(Some("New Tab"));
     title_label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
     title_label.set_hexpand(true);
@@ -370,10 +521,12 @@ fn add_tab(
     // Right-click context menu on tab label
     let tab_menu_model = gtk4::gio::Menu::new();
     tab_menu_model.append(Some("Open in New Window"), Some("tabctx.open-new-window"));
+    let mute_section = gtk4::gio::Menu::new();
+    mute_section.append(Some("Mute Tab"), Some("tabctx.toggle-mute"));
+    tab_menu_model.append_section(None, &mute_section);
     let close_section = gtk4::gio::Menu::new();
-    close_section.append(Some("Close"), Some("tabctx.close"));
-    close_section.append(Some("Close Others"), Some("tabctx.close-others"));
-    close_section.append(Some("Close All"), Some("tabctx.close-all"));
+    close_section.append(Some("Close Tab"), Some("tabctx.close"));
+    close_section.append(Some("Close Other Tabs"), Some("tabctx.close-others"));
     tab_menu_model.append_section(None, &close_section);
     let tab_popup = gtk4::PopoverMenu::from_model(Some(&tab_menu_model));
     tab_popup.set_parent(&tab_box);
@@ -423,22 +576,25 @@ fn add_tab(
     ));
     tab_action_group.add_action(&close_others_action);
 
-    let close_all_action = gtk4::gio::SimpleAction::new("close-all", None);
-    close_all_action.connect_activate(clone!(
-        #[weak] window,
+    let toggle_mute_action = gtk4::gio::SimpleAction::new("toggle-mute", None);
+    toggle_mute_action.connect_activate(clone!(
+        #[weak] webview,
         move |_, _| {
-            window.close();
+            webview.set_is_muted(!webview.is_muted());
         }
     ));
-    tab_action_group.add_action(&close_all_action);
+    tab_action_group.add_action(&toggle_mute_action);
 
     tab_box.insert_action_group("tabctx", Some(&tab_action_group));
 
     let tab_right_click = gtk4::GestureClick::new();
     tab_right_click.set_button(3);
     tab_right_click.connect_pressed(clone!(
-        #[weak] tab_popup,
+        #[weak] tab_popup, #[weak] mute_section, #[weak] webview,
         move |gesture, _, x, y| {
+            while mute_section.n_items() > 0 { mute_section.remove(0); }
+            let label = if webview.is_muted() { "Unmute Tab" } else { "Mute Tab" };
+            mute_section.append(Some(label), Some("tabctx.toggle-mute"));
             gesture.set_state(gtk4::EventSequenceState::Claimed);
             let rect = gtk4::gdk::Rectangle::new(x as i32, y as i32, 1, 1);
             tab_popup.set_pointing_to(Some(&rect));
@@ -447,15 +603,45 @@ fn add_tab(
     ));
     tab_box.add_controller(tab_right_click);
 
+    let is_private = PRIVATE.with(|p| *p.borrow());
+
     webview.connect_notify_local(
         Some("title"),
         clone!(#[weak] title_label, #[weak] webview, move |_, _| {
             let title = webview.title().unwrap_or_default();
-            title_label.set_text(if title.is_empty() { "New Tab" } else { &title });
+            let base = if title.is_empty() { "New Tab".to_string() } else { title.to_string() };
+            let base = if webview.is_muted() { format!("{} (muted)", base) } else { base };
+            let display = if is_private { format!("(Private) {}", base) } else { base };
+            title_label.set_text(&display);
             let uri = webview.uri().unwrap_or_default();
             update_recent(&uri, &title);
         }),
     );
+
+    webview.connect_notify_local(
+        Some("is-muted"),
+        clone!(#[weak] title_label, #[weak] webview, move |_, _| {
+            let title = webview.title().unwrap_or_default();
+            let base = if title.is_empty() { "New Tab".to_string() } else { title.to_string() };
+            let base = if webview.is_muted() { format!("{} (muted)", base) } else { base };
+            let display = if is_private { format!("(Private) {}", base) } else { base };
+            title_label.set_text(&display);
+        }),
+    );
+
+    webview.connect_load_changed(clone!(
+        #[weak] favicon_img, #[weak] webview,
+        move |_, load_event| {
+            if load_event == webkit6::LoadEvent::Finished {
+                if let Some(texture) = webview.favicon() {
+                    favicon_img.set_paintable(Some(&texture));
+                    if let Some(uri) = webview.uri() {
+                        update_recent_favicon(&uri, &texture);
+                    }
+                }
+            }
+        }
+    ));
 
     webview.connect_favicon_notify(clone!(#[weak] favicon_img, move |webview| {
         let favicon = webview.favicon();
@@ -488,11 +674,12 @@ fn add_tab(
 }
 
 fn create_browser_window(app: &Application, related_view: Option<&WebView>) -> WebView {
+    let title = if PRIVATE.with(|i| *i.borrow()) { "rug — private browsing" } else { "rug" };
     let window = ApplicationWindow::builder()
         .application(app)
         .default_width(800)
         .default_height(600)
-        .title("rug")
+        .title(title)
         .build();
 
     let container = GtkBox::new(Orientation::Vertical, 0);
@@ -500,25 +687,33 @@ fn create_browser_window(app: &Application, related_view: Option<&WebView>) -> W
     let url_bar = Entry::new();
     url_bar.set_hexpand(true);
 
-    let completion_popover = Popover::new();
-    completion_popover.set_parent(&url_bar);
-    completion_popover.set_has_arrow(false);
-    completion_popover.set_autohide(false);
-    completion_popover.set_position(gtk4::PositionType::Bottom);
     let completion_list = ListBox::new();
     completion_list.set_selection_mode(gtk4::SelectionMode::Single);
-    let completion_scroll = ScrolledWindow::new();
-    completion_scroll.set_policy(gtk4::PolicyType::Never, gtk4::PolicyType::Never);
-    completion_scroll.set_child(Some(&completion_list));
-    completion_popover.set_child(Some(&completion_scroll));
-    completion_popover.add_css_class("url-completion");
-    // Zero out popover padding so surface width == content width exactly
-    let popover_css = gtk4::CssProvider::new();
-    popover_css.load_from_data("popover.url-completion > contents { padding: 0; }");
+    completion_list.set_focusable(false);
+    let completion_box = GtkBox::new(Orientation::Vertical, 0);
+    completion_box.add_css_class("completion-dropdown");
+    completion_box.set_visible(false);
+    completion_box.set_halign(gtk4::Align::Start);
+    completion_box.set_valign(gtk4::Align::Start);
+    completion_box.append(&completion_list);
+    let completion_css = gtk4::CssProvider::new();
+    completion_css.load_from_data(
+        ".completion-dropdown { background: @theme_bg_color; border: 1px solid @borders; border-radius: 0 0 4px 4px; }"
+    );
     if let Some(display) = gtk4::gdk::Display::default() {
         gtk4::style_context_add_provider_for_display(
-            &display, &popover_css, gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
+            &display, &completion_css, gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
         );
+    }
+
+    if PRIVATE.with(|p| *p.borrow()) {
+        let private_css = gtk4::CssProvider::new();
+        private_css.load_from_data(".private-favicon { filter: invert(1); }");
+        if let Some(display) = gtk4::gdk::Display::default() {
+            gtk4::style_context_add_provider_for_display(
+                &display, &private_css, gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
+            );
+        }
     }
 
     let bar_focused = std::rc::Rc::new(std::cell::Cell::new(false));
@@ -530,12 +725,12 @@ fn create_browser_window(app: &Application, related_view: Option<&WebView>) -> W
             url_bar.select_region(0, -1);
         }));
     }));
-    focus_ctrl.connect_leave(clone!(#[weak] completion_popover, #[strong] bar_focused, move |_| {
+    focus_ctrl.connect_leave(clone!(#[weak] completion_box, #[strong] bar_focused, move |_| {
         bar_focused.set(false);
         glib::timeout_add_local_once(
             std::time::Duration::from_millis(150),
-            clone!(#[weak] completion_popover, move || {
-                completion_popover.popdown();
+            clone!(#[weak] completion_box, move || {
+                completion_box.set_visible(false);
             }),
         );
     }));
@@ -583,9 +778,9 @@ fn create_browser_window(app: &Application, related_view: Option<&WebView>) -> W
     let url_key_ctrl = gtk4::EventControllerKey::new();
     url_key_ctrl.set_propagation_phase(gtk4::PropagationPhase::Capture);
     url_key_ctrl.connect_key_pressed(clone!(
-        #[strong] completion_popover, #[strong] completion_list, #[strong] url_bar, #[strong] notebook,
+        #[strong] completion_box, #[strong] completion_list, #[strong] url_bar, #[strong] notebook,
         move |_, key, _, _| {
-            if !completion_popover.is_visible() {
+            if !completion_box.is_visible() {
                 return glib::Propagation::Proceed;
             }
             match key {
@@ -629,7 +824,7 @@ fn create_browser_window(app: &Application, related_view: Option<&WebView>) -> W
                     if let Some(row) = completion_list.selected_row() {
                         let url = row.widget_name().to_string();
                         url_bar.set_text(&url);
-                        completion_popover.popdown();
+                        completion_box.set_visible(false);
                         completion_list.unselect_all();
                         if let Some(wv) = current_webview(&notebook) {
                             wv.load_uri(&url);
@@ -639,7 +834,7 @@ fn create_browser_window(app: &Application, related_view: Option<&WebView>) -> W
                     glib::Propagation::Proceed
                 }
                 Key::Escape => {
-                    completion_popover.popdown();
+                    completion_box.set_visible(false);
                     completion_list.unselect_all();
                     glib::Propagation::Stop
                 }
@@ -649,8 +844,8 @@ fn create_browser_window(app: &Application, related_view: Option<&WebView>) -> W
     ));
     url_bar.add_controller(url_key_ctrl);
 
-    go_button.connect_clicked(clone!(#[weak] notebook, #[weak] url_bar, #[weak] completion_popover, move |_| {
-        completion_popover.popdown();
+    go_button.connect_clicked(clone!(#[weak] notebook, #[weak] url_bar, #[weak] completion_box, move |_| {
+        completion_box.set_visible(false);
         if let Some(webview) = current_webview(&notebook) {
             webview.load_uri(&smart_uri(&url_bar.text()));
         }
@@ -669,31 +864,29 @@ fn create_browser_window(app: &Application, related_view: Option<&WebView>) -> W
     }));
 
     url_bar.connect_changed(clone!(
-        #[weak] completion_popover, #[weak] completion_list, #[weak] completion_scroll,
-        #[weak] url_bar, #[weak] notebook, #[strong] bar_focused,
+        #[weak] completion_box, #[weak] completion_list,
+        #[weak] url_bar, #[weak] notebook, #[weak] container, #[strong] bar_focused,
         move |_| {
             while let Some(child) = completion_list.first_child() {
                 completion_list.remove(&child);
             }
             if !bar_focused.get() {
-                completion_popover.popdown();
+                completion_box.set_visible(false);
                 return;
             }
             let text = url_bar.text().to_string();
             if text.is_empty() {
-                completion_popover.popdown();
+                completion_box.set_visible(false);
                 return;
             }
             let results = search_history(&text, 8);
             if results.is_empty() {
-                completion_popover.popdown();
+                completion_box.set_visible(false);
                 return;
             }
-            let w = url_bar.width();
-            completion_scroll.set_min_content_width(w);
-            completion_scroll.set_max_content_width(w);
             for (url, title, _) in results {
                 let row = gtk4::ListBoxRow::new();
+                row.set_focusable(false);
                 let row_box = GtkBox::new(Orientation::Horizontal, 8);
                 row_box.set_margin_start(8);
                 row_box.set_margin_end(8);
@@ -712,13 +905,14 @@ fn create_browser_window(app: &Application, related_view: Option<&WebView>) -> W
                 let text_box = GtkBox::new(Orientation::Vertical, 2);
                 text_box.set_hexpand(true);
                 let display_title = if title.is_empty() { url.clone() } else { title.clone() };
-                let title_lbl = Label::new(Some(&display_title));
+                let title_lbl = Label::new(None);
+                title_lbl.set_markup(&highlight_match(&display_title, &text));
                 title_lbl.set_halign(gtk4::Align::Start);
                 title_lbl.set_ellipsize(gtk4::pango::EllipsizeMode::End);
                 let url_lbl = Label::new(None);
                 url_lbl.set_markup(&format!(
                     "<small><span foreground='#888888'>{}</span></small>",
-                    pango_esc(&url)
+                    highlight_match(&url, &text)
                 ));
                 url_lbl.set_halign(gtk4::Align::Start);
                 url_lbl.set_ellipsize(gtk4::pango::EllipsizeMode::End);
@@ -730,27 +924,27 @@ fn create_browser_window(app: &Application, related_view: Option<&WebView>) -> W
                 let click = gtk4::GestureClick::new();
                 let nav_url = url.clone();
                 click.connect_pressed(clone!(
-                    #[weak] notebook, #[weak] url_bar, #[weak] completion_popover,
+                    #[weak] notebook, #[weak] url_bar, #[weak] completion_box,
                     move |_, _, _, _| {
                         url_bar.set_text(&nav_url);
                         if let Some(wv) = current_webview(&notebook) {
                             wv.load_uri(&nav_url);
                         }
-                        completion_popover.popdown();
+                        completion_box.set_visible(false);
                     }
                 ));
                 row.add_controller(click);
                 completion_list.append(&row);
             }
-            let (_, nat_h, _, _) = completion_list.measure(gtk4::Orientation::Vertical, -1);
-            completion_scroll.set_max_content_height(-1);
-            completion_scroll.set_min_content_height(nat_h);
-            completion_scroll.set_max_content_height(nat_h);
-            completion_popover.set_size_request(w, -1);
-            completion_popover.queue_resize();
-            if !completion_popover.is_visible() {
-                completion_popover.popup();
+            if let Some(bounds) = url_bar.compute_bounds(&container) {
+                let x = bounds.x() as i32;
+                let y = (bounds.y() + bounds.height()) as i32;
+                let w = bounds.width() as i32;
+                completion_box.set_margin_start(x);
+                completion_box.set_margin_top(y);
+                completion_list.set_size_request(w, -1);
             }
+            completion_box.set_visible(true);
         }
     ));
 
@@ -791,7 +985,10 @@ fn create_browser_window(app: &Application, related_view: Option<&WebView>) -> W
     container.set_hexpand(true);
     container.set_vexpand(true);
 
-    window.set_child(Some(&container));
+    let window_overlay = Overlay::new();
+    window_overlay.set_child(Some(&container));
+    window_overlay.add_overlay(&completion_box);
+    window.set_child(Some(&window_overlay));
     window.add_controller(ev_ctrl);
     window.present();
 
@@ -799,12 +996,57 @@ fn create_browser_window(app: &Application, related_view: Option<&WebView>) -> W
 }
 
 fn main() {
+    if std::env::args().any(|a| a == "--private") {
+        PRIVATE.with(|i| *i.borrow_mut() = true);
+    }
+
     let app = Application::builder()
         .application_id("com.computermouth.rug")
+        .flags(gtk4::gio::ApplicationFlags::NON_UNIQUE)
         .build();
 
     app.connect_activate(|app| {
-        load_recent();
+        let incognito = PRIVATE.with(|i| *i.borrow());
+        if !incognito { load_recent(); }
+        load_settings();
+        if incognito {
+            apply_dark_mode(true);
+        } else {
+            apply_dark_mode(DARK_MODE.with(|d| *d.borrow()));
+        }
+
+        #[cfg(debug_assertions)]
+        let (data_dir, cache_dir) = (
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/tmp/wk_data"),
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/tmp/wk_cache"),
+        );
+        #[cfg(not(debug_assertions))]
+        let (data_dir, cache_dir) = (
+            glib::home_dir().join(".local/share/rug"),
+            glib::home_dir().join(".cache/rug"),
+        );
+        let ns = if incognito {
+            webkit6::NetworkSession::new_ephemeral()
+        } else {
+            webkit6::NetworkSession::new(
+                Some(&data_dir.to_string_lossy()),
+                Some(&cache_dir.to_string_lossy()),
+            )
+        };
+        if let Some(wdm) = ns.website_data_manager() {
+            wdm.set_favicons_enabled(true);
+        }
+        if !incognito {
+            if let Some(cm) = ns.cookie_manager() {
+                let cookie_file = data_dir.join("cookies.sqlite");
+                cm.set_persistent_storage(
+                    &cookie_file.to_string_lossy(),
+                    webkit6::CookiePersistentStorage::Sqlite,
+                );
+            }
+        }
+        NETWORK_SESSION.with(|s| *s.borrow_mut() = Some(ns));
+
         let webview = create_browser_window(app, None);
 
         webview.web_context().unwrap().register_uri_scheme("rug", |request| {
@@ -812,12 +1054,41 @@ fn main() {
                 "rug://home" => {
                     let p = recent_pages_snapshot();
                     let top: Vec<(String, String)> = p.iter().take(8).map(|(u, t, _)| (u.clone(), t.clone())).collect();
-                    html::home(&top, &top_domains(12))
+                    html::home(&top, &top_domains(16), DARK_MODE.with(|d| *d.borrow()), PRIVATE.with(|i| *i.borrow()))
                 }
                 s if s.starts_with("rug://settings") => {
-                    let cleared = s.contains("?clear=1");
+                    let params = parse_query_params(s);
+                    let cleared = params.get("clear").map(|v| v == "1").unwrap_or(false);
                     if cleared { clear_history(); }
-                    html::settings(cleared)
+                    let cache_cleared = params.get("clear_cache").map(|v| v == "1").unwrap_or(false);
+                    if cache_cleared { clear_cache(); }
+                    let cookies_cleared = params.get("clear_cookies").map(|v| v == "1").unwrap_or(false);
+                    if cookies_cleared { clear_cookies(); }
+                    if let Some(engine) = params.get("engine") {
+                        let valid = ["ddg", "google", "bing", "custom"];
+                        if valid.contains(&engine.as_str()) {
+                            SEARCH_ENGINE.with(|e| *e.borrow_mut() = engine.clone());
+                            let custom = params.get("custom_url").cloned().unwrap_or_default();
+                            CUSTOM_SEARCH_URL.with(|u| *u.borrow_mut() = custom);
+                            let dark = params.get("theme").map(|t| t == "dark").unwrap_or(false);
+                            DARK_MODE.with(|d| *d.borrow_mut() = dark);
+                            apply_dark_mode(dark);
+                            let cache = params.get("cache").map(|v| v == "enabled").unwrap_or(true);
+                            CACHE_ENABLED.with(|c| *c.borrow_mut() = cache);
+                            save_settings();
+                        }
+                    }
+                    let engine = SEARCH_ENGINE.with(|e| e.borrow().clone());
+                    let custom_url = CUSTOM_SEARCH_URL.with(|u| u.borrow().clone());
+                    let dark = DARK_MODE.with(|d| *d.borrow());
+                    let cache_enabled = CACHE_ENABLED.with(|c| *c.borrow());
+                    html::settings(cleared, &engine, &custom_url, dark, cache_enabled, cache_cleared, cookies_cleared)
+                }
+                "rug://private" => {
+                    if let Ok(exe) = std::env::current_exe() {
+                        std::process::Command::new(exe).arg("--private").spawn().ok();
+                    }
+                    String::from("<!DOCTYPE html><html><head><meta http-equiv=\"refresh\" content=\"0;url=rug://home\"></head><body></body></html>")
                 }
                 _ => String::from("<!DOCTYPE html><html><body>Not found</body></html>"),
             };
@@ -826,9 +1097,18 @@ fn main() {
             request.finish(&stream, bytes.len() as i64, Some("text/html"));
         });
 
-        let session = webview.network_session().unwrap();
-        session.website_data_manager().unwrap().set_favicons_enabled(true);
+        if !incognito {
+            let cache_model = if CACHE_ENABLED.with(|c| *c.borrow()) {
+                webkit6::CacheModel::WebBrowser
+            } else {
+                webkit6::CacheModel::DocumentViewer
+            };
+            if let Some(ctx) = webview.web_context() {
+                ctx.set_cache_model(cache_model);
+            }
+        }
 
+        let session = webview.network_session().unwrap();
         session.connect_download_started(clone!(#[strong] app, move |_, download| {
             download.connect_decide_destination(clone!(#[strong] app, move |download, suggested_filename| {
                 let download = download.clone();
@@ -854,5 +1134,6 @@ fn main() {
         }));
     });
 
-    app.run();
+    let argv0 = std::env::args().next().unwrap_or_default();
+    app.run_with_args(&[argv0]);
 }
