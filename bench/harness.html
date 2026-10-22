@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>rug bench</title>
+<style>
+  html, body { margin: 0; height: 100%; font: 14px sans-serif; }
+  #status { position: fixed; top: 0; left: 0; right: 0; padding: 4px 8px; background: #222; color: #eee; z-index: 1; }
+  iframe { position: absolute; top: 24px; left: 0; width: 100%; height: calc(100% - 24px); border: 0; background: #fff; }
+</style>
+</head>
+<body>
+<div id="status">starting</div>
+<script>
+// Driven by bench.py: runs each requested suite in a same-origin iframe and
+// POSTs results back to the server, which also samples memory at each mark.
+const params = new URLSearchParams(location.search);
+const suites = (params.get('suites') || 'load,speedometer,motionmark,jetstream').split(',');
+const runs = Number(params.get('runs') || 5);
+const SITES = [
+  'sites/en.wikipedia.org/wiki/Web_browser.html',
+  'sites/news.ycombinator.com/index.html',
+  'sites/developer.mozilla.org/en-US/docs/Web/HTML.html',
+  'sites/github.com/rust-lang/rust.html',
+  'sites/www.bbc.com/news.html',
+];
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const status = s => { document.getElementById('status').textContent = s; };
+
+async function post(path, body) {
+  try {
+    await fetch(path, { method: 'POST', body: JSON.stringify(body) });
+  } catch (e) {}
+}
+const result = (suite, data) => post('/result', { suite, ...data });
+// The server records memory when it gets a mark; wait for it.
+const mark = name => post('/mark', { name });
+
+function frame(src) {
+  const f = document.createElement('iframe');
+  f.src = src;
+  document.body.append(f);
+  return f;
+}
+
+function clear() {
+  document.querySelectorAll('iframe').forEach(f => f.remove());
+}
+
+async function until(test, timeoutMs, everyMs = 500) {
+  const end = performance.now() + timeoutMs;
+  while (performance.now() < end) {
+    const v = await test();
+    if (v) return v;
+    await sleep(everyMs);
+  }
+  throw new Error('timed out');
+}
+
+const median = xs => { const s = [...xs].sort((a, b) => a - b); return s[Math.floor(s.length / 2)]; };
+
+async function loadOnce(src) {
+  const start = performance.now();
+  const f = frame(src + '?r=' + Math.random());
+  await new Promise((resolve, reject) => {
+    f.onload = resolve;
+    setTimeout(() => reject(new Error('load timed out')), 60000);
+  });
+  const total = performance.now() - start;
+  const nav = f.contentWindow.performance.getEntriesByType('navigation')[0];
+  const dcl = nav ? nav.domContentLoadedEventEnd : null;
+  f.remove();
+  return { total, dcl };
+}
+
+const SUITES = {
+  async load() {
+    const pages = {};
+    for (const site of SITES) {
+      const name = site.split('/')[1];
+      const totals = [], dcls = [];
+      for (let i = 0; i < runs; i++) {
+        status(`page load: ${name} ${i + 1}/${runs}`);
+        try {
+          const r = await loadOnce(site);
+          totals.push(r.total);
+          if (r.dcl != null) dcls.push(r.dcl);
+        } catch (e) {}
+        await sleep(300);
+      }
+      pages[name] = { first: totals[0], median: median(totals.slice(1)), dcl_median: median(dcls.slice(1)), n: totals.length };
+    }
+    await result('load', { pages });
+
+    status('memory: all pages open');
+    const frames = SITES.map(frame);
+    await Promise.all(frames.map(f => new Promise(r => { f.onload = r; setTimeout(r, 30000); })));
+    await sleep(5000);
+    await mark('pages_open');
+    clear();
+  },
+
+  async speedometer() {
+    status('Speedometer 3.1');
+    const f = frame('speedometer/index.html?startAutomatically=true');
+    await new Promise(r => f.onload = r);
+    const w = f.contentWindow;
+    // 3.1 has no "done" event; hook the client's last callback instead.
+    await new Promise((resolve, reject) => {
+      const finish = w.benchmarkClient.didFinishLastIteration;
+      w.benchmarkClient.didFinishLastIteration = function () {
+        finish.apply(this, arguments);
+        resolve();
+      };
+      setTimeout(() => reject(new Error('Speedometer timed out')), 20 * 60000);
+    });
+    const score = w.benchmarkClient._metrics.Score;
+    await result('speedometer', { score: score.mean, delta: score.delta });
+    await mark('after_speedometer');
+    clear();
+  },
+
+  async motionmark() {
+    status('MotionMark 1.3.2');
+    const f = frame('motionmark/MotionMark/index.html');
+    await new Promise(r => f.onload = r);
+    const w = f.contentWindow;
+    // It measures the display's frame rate before enabling Start.
+    await until(() => !w.document.getElementById('start-button').disabled, 60000);
+    const done = new Promise((resolve, reject) => {
+      const show = w.benchmarkController.showResults;
+      w.benchmarkController.showResults = function () {
+        show.apply(this, arguments);
+        resolve();
+      };
+      setTimeout(() => reject(new Error('MotionMark timed out')), 20 * 60000);
+    });
+    // Scores are only comparable at the same target frame rate, so always
+    // aim for 60 and report what the browser actually managed alongside.
+    const params = w.benchmarkController.benchmarkDefaultParameters;
+    const detected = params['frame-rate'];
+    params['frame-rate'] = params['system-frame-rate'] = 60;
+    w.benchmarkController.startBenchmark();
+    await done;
+    const r = w.benchmarkRunnerClient.results;
+    await result('motionmark', { score: r.score, lower: r.scoreLowerBound, upper: r.scoreUpperBound, detected_fps: detected });
+    await mark('after_motionmark');
+    clear();
+  },
+};
+
+window.addEventListener('load', async () => {
+  await post('/ready', {});
+  status('idle');
+  await sleep(5000);
+  await mark('idle');
+  for (const name of suites.filter(s => s !== 'jetstream')) {
+    try {
+      await SUITES[name]();
+    } catch (e) {
+      clear();
+      await result(name, { error: String(e) });
+    }
+  }
+  // JetStream only runs as the top-level page (it calls top.currentResolve),
+  // so it goes last: report=true starts it and POSTs results to /report,
+  // which ends the run.
+  if (suites.includes('jetstream')) {
+    location.href = 'jetstream/index.html?report=true';
+    return;
+  }
+  status('done');
+  await post('/done', {});
+});
+</script>
+</body>
+</html>

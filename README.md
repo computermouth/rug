@@ -25,6 +25,7 @@ Optional: `gpg` (for the password manager) and `git` (for sync).
 
 ## Using it
 
+- `rug [URL or search]` opens it in the first tab.
 - **Home** (`rug://home`) has your bookmarks, frequent sites and recent
   history. Hover an item for its × to forget it.
 - **URL bar** takes a URL or a search; the dropdown completes from history.
@@ -63,6 +64,36 @@ Every machine needs the GPG secret key to read the passwords. For SSH
 remotes, have your key loaded in an agent; rug won't stop to prompt.
 
 Cookies, cache and favicons stay local to each machine.
+
+## Benchmarks
+
+`bench/bench.py` runs rug, Firefox and Chromium through page loads of saved
+real pages, Speedometer, JetStream and MotionMark, and records memory along
+the way. Run it once with `--fetch`, then with no arguments. It takes over
+the screen for about an hour.
+
+One run, October 2026, on a Ryzen AI 7 PRO 360 laptop. The versions were rug
+on WebKitGTK 2.52.6, Firefox ESR 140.14 and Chromium 153. Bold is best.
+
+| | rug | Firefox | Chromium |
+|---|---|---|---|
+| Startup | 1.15 s | 2.35 s | **0.85 s** |
+| Load Wikipedia | 271 ms | 224 ms | **146 ms** |
+| Load Hacker News | **28 ms** | 37 ms | 36 ms |
+| Load MDN | 127 ms | 135 ms | **121 ms** |
+| Load GitHub | 348 ms | 407 ms | **336 ms** |
+| Load BBC News | 278 ms | 229 ms | **182 ms** |
+| Speedometer 3.1 (higher is better) | 10.07 | 9.69 | **12.74** |
+| JetStream 2.2 (higher is better) | 166.4 | 115.2 | **192.7** |
+| MotionMark 1.3.2 (higher is better) | 593* | 749 | **1861** |
+| Memory, idle | **273 MB** | 619 MB | 408 MB |
+| Memory, 5 pages open | **605 MB** | 1065 MB | 676 MB |
+| Memory, peak | 2262 MB | 2114 MB | **1816 MB** |
+
+Page loads are medians of 5, using saved copies served from localhost.
+Memory is the PSS of each browser's whole process tree.
+
+\* rug only managed about 30 fps, so its MotionMark score is very noisy.
 
 ## Hacking
 

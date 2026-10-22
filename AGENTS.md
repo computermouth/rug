@@ -20,6 +20,7 @@ Notes for anyone (human or LLM) changing rug.
 | `src/urls.rs` | URL and query-string helpers |
 | `assets/pages/` | HTML, CSS and JS for the `rug://` pages, filled from `{{name}}` placeholders |
 | `assets/autofill.js` | Login capture and filling, injected into pages |
+| `bench/` | Benchmarks against Firefox and Chromium (`bench.py`, `harness.html`) |
 
 ## Rules of thumb
 

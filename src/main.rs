@@ -45,7 +45,12 @@ fn main() {
         sync::start();
     }
 
-    app.run::<BrowserWindow>(Page::Home);
+    // `rug [--private] [URL or search]`
+    let start = match args.iter().skip(1).find(|a| !a.starts_with("--")) {
+        Some(input) => Page::Uri(urls::resolve(input, &store::settings())),
+        None => Page::Home,
+    };
+    app.run::<BrowserWindow>(start);
     if private {
         sync::commit();
     } else {
