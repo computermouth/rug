@@ -1,20 +1,25 @@
 //! The internal `rug://` pages. Templates and their assets live in
 //! `assets/pages`; `{{name}}` placeholders are filled in here.
 
+use gtk::prelude::*;
 use gtk::{gio, glib};
 use webkit6::{URISchemeRequest, WebContext};
 
+use crate::passwords::{self, Login};
 use crate::store::{self, Engine};
-use crate::{bookmarks, paths, urls};
+use crate::{bookmarks, paths, sync, urls};
 
 pub const HOME: &str = "rug://home";
+pub const PASSWORDS: &str = "rug://passwords";
 const BOOKMARKS: &str = "rug://bookmarks";
+const SETTINGS: &str = "rug://settings";
 
 const HOME_TEMPLATE: &str = include_str!("../assets/pages/home.html");
 const PRIVATE_HOME: &str = include_str!("../assets/pages/private.html");
 const SETTINGS_TEMPLATE: &str = include_str!("../assets/pages/settings.html");
 const BOOKMARKS_TEMPLATE: &str = include_str!("../assets/pages/bookmarks.html");
 const BOOKMARK_DIALOG: &str = include_str!("../assets/pages/bookmark-dialog.html");
+const PASSWORDS_TEMPLATE: &str = include_str!("../assets/pages/passwords.html");
 const NOT_FOUND: &str = "<!DOCTYPE html><p>Not found</p>";
 
 /// Served at `rug://assets/<name>`.
@@ -30,16 +35,45 @@ pub fn register(context: &WebContext) {
     context.register_uri_scheme("rug", handle);
 }
 
+/// Answered asynchronously, since some actions (syncing, re-encrypting
+/// passwords) take a while.
 fn handle(request: &URISchemeRequest) {
-    let uri = request.uri().unwrap_or_default();
+    let request = request.clone();
+    glib::spawn_future_local(async move {
+        let uri = request.uri().unwrap_or_default();
+        let form = match request.http_body() {
+            Some(stream) => read_all(stream).await,
+            None => String::new(),
+        };
+        let (mime, body) = route(&uri, &form).await;
+        let stream = gio::MemoryInputStream::from_bytes(&body);
+        request.finish(&stream, body.len() as i64, Some(mime));
+    });
+}
+
+/// A POSTed form's body. Forms carrying passwords are POSTed, keeping the
+/// password out of the URL (and so out of history).
+async fn read_all(stream: gio::InputStream) -> String {
+    let mut body = Vec::new();
+    while let Ok(chunk) = stream.read_bytes_future(64 * 1024, glib::Priority::DEFAULT).await {
+        if chunk.is_empty() {
+            break;
+        }
+        body.extend_from_slice(&chunk);
+    }
+    String::from_utf8_lossy(&body).into_owned()
+}
+
+async fn route(uri: &str, form: &str) -> (&'static str, glib::Bytes) {
     let rest = uri.strip_prefix("rug://").unwrap_or_default();
     let rest = rest.split('#').next().unwrap_or_default();
     let (path, query) = rest.split_once('?').unwrap_or((rest, ""));
 
-    let (mime, body) = match path {
+    match path {
         "home" => html(home(query)),
-        "settings" => html(settings(query)),
+        "settings" => html(settings(query).await),
         "bookmarks" => html(bookmarks_page(query)),
+        "passwords" => html(passwords_page(query, form).await),
         "private" => {
             open_private_window();
             html(redirect(HOME))
@@ -48,9 +82,7 @@ fn handle(request: &URISchemeRequest) {
             Some(&(_, mime, bytes)) => (mime, glib::Bytes::from_static(bytes)),
             None => html(NOT_FOUND.into()),
         },
-    };
-    let stream = gio::MemoryInputStream::from_bytes(&body);
-    request.finish(&stream, body.len() as i64, Some(mime));
+    }
 }
 
 fn html(page: String) -> (&'static str, glib::Bytes) {
@@ -197,7 +229,7 @@ fn bookmark_dialog(return_to: &str) -> String {
 
 /// Renders the settings page, first applying whatever actions or form
 /// submission are in the query string.
-fn settings(query: &str) -> String {
+async fn settings(query: &str) -> String {
     let params = urls::parse_query(query);
     let param = |k: &str| params.get(k).map(String::as_str);
 
@@ -226,6 +258,41 @@ fn settings(query: &str) -> String {
         crate::apply_theme(param("theme") == Some("dark"));
     }
 
+    let mut password_error = String::new();
+    if let Some(key) = param("gpg_key").filter(|k| !k.is_empty() && passwords::keys().first().map(String::as_str) != Some(k)) {
+        let key = key.to_string();
+        match gio::spawn_blocking(move || passwords::set_key(&key)).await {
+            Ok(Ok(())) => sync::sync_soon(),
+            Ok(Err(e)) => password_error = format!("Couldn't switch keys: {e}"),
+            Err(_) => password_error = "Couldn't switch keys: gpg crashed".into(),
+        }
+    }
+    let mut sync_error = String::new();
+    if let Some(remote) = param("remote").filter(|r| r.trim() != sync::remote()) {
+        if let Err(e) = sync::set_remote(remote) {
+            sync_error = format!("Couldn't set the remote: {e}");
+        }
+    }
+    // Sync Now submits the form, so the remote it uses is saved above.
+    if param("sync") == Some("1") && sync_error.is_empty() {
+        sync::sync_now(false).await;
+        return redirect(SETTINGS);
+    }
+
+    let sync_failed = !sync_error.is_empty() || sync::status().starts_with("Sync failed");
+    let sync_status = if sync_error.is_empty() { sync::status() } else { sync_error };
+
+    let current_key = passwords::keys().into_iter().next().unwrap_or_default();
+    let mut key_options = String::new();
+    if current_key.is_empty() {
+        key_options.push_str(r#"<option value="" selected>Choose a key…</option>"#);
+    }
+    for (fingerprint, uid) in passwords::secret_keys() {
+        let selected = if fingerprint == current_key { "selected" } else { "" };
+        let short = &fingerprint[fingerprint.len().saturating_sub(8)..];
+        key_options.push_str(&format!(r#"<option value="{}" {selected}>{} ({short})</option>"#, esc(&fingerprint), esc(&uid)));
+    }
+
     let s = store::settings();
     let checked = |on: bool| if on { "checked" } else { "" };
     let hidden = |on: bool| if on { "" } else { "hidden" };
@@ -244,7 +311,83 @@ fn settings(query: &str) -> String {
         ("history_msg_hidden", hidden(history_cleared)),
         ("cache_msg_hidden", hidden(cache_cleared)),
         ("cookies_msg_hidden", hidden(cookies_cleared)),
+        ("key_options", &key_options),
+        ("password_error", &esc(&password_error)),
+        ("password_error_hidden", hidden(!password_error.is_empty())),
+        ("remote", &esc(&sync::remote())),
+        ("profile_dir", &esc(&paths::profile_dir().to_string_lossy())),
+        ("sync_status", &esc(&sync_status)),
+        ("sync_class", if sync_failed { "error" } else { "msg" }),
     ])
+}
+
+/// Lists saved logins; deletes the one in the query, or adds the one in
+/// the POSTed `form`.
+async fn passwords_page(query: &str, form: &str) -> String {
+    let params = urls::parse_query(query);
+    if let (Some(host), Some(username)) = (params.get("host"), params.get("username")) {
+        passwords::delete(&Login::new(host, username));
+        sync::sync_soon();
+        return redirect(PASSWORDS);
+    }
+
+    let added = urls::parse_query(form);
+    let field = |k: &str| added.get(k).map(|v| v.trim().to_string()).unwrap_or_default();
+    let (site, username) = (field("site"), field("username"));
+    let password = added.get("password").cloned().unwrap_or_default();
+    let mut error = String::new();
+    if !site.is_empty() {
+        match site_host(&site) {
+            None => error = format!("“{site}” isn't a site address."),
+            Some(_) if password.is_empty() => error = "Enter a password.".into(),
+            Some(host) => {
+                let login = Login::new(&host, &username);
+                let url = format!("https://{host}");
+                match gio::spawn_blocking(move || passwords::save(&login, &password, &url)).await {
+                    Ok(Ok(())) => {
+                        sync::sync_soon();
+                        return redirect(PASSWORDS);
+                    }
+                    Ok(Err(e)) => error = format!("Couldn't save: {e}"),
+                    Err(_) => error = "Couldn't save: gpg crashed".into(),
+                }
+            }
+        }
+    }
+
+    let rows: String = passwords::all()
+        .iter()
+        .map(|l| {
+            format!(
+                r#"<li><img src="https://{host}/favicon.ico" data-fallback="rug://assets/favicon.svg"><a href="https://{host}">{host}</a><span class="username">{name}</span><a class="remove" href="{PASSWORDS}?host={host_q}&username={user_q}" title="Delete" data-confirm="Delete the saved password for {name} on {host}?">×</a></li>"#,
+                host = esc(&l.host),
+                name = esc(if l.username.is_empty() { "(no username)" } else { &l.username }),
+                host_q = urls::encode(&l.host),
+                user_q = urls::encode(&l.username),
+            )
+        })
+        .collect();
+    let key = passwords::keys().join(", ");
+    render(PASSWORDS_TEMPLATE, &[
+        ("theme", theme(store::settings().dark)),
+        ("rows", &rows),
+        ("key", &esc(if key.is_empty() { "no key chosen" } else { &key })),
+        ("dir", &esc(&paths::passwords_dir().to_string_lossy())),
+        ("error", &esc(&error)),
+        // Keep what was typed (except the password) when saving failed.
+        ("site", &esc(&site)),
+        ("username", &esc(&username)),
+    ])
+}
+
+/// The host to save a login under, from a host or a pasted URL: what the
+/// save prompt would use on that site.
+fn site_host(site: &str) -> Option<String> {
+    let url = if site.contains("://") { site.to_string() } else { format!("https://{site}") };
+    let (_, host) = urls::origin(&url)?;
+    let host = host.rsplit('@').next()?.to_lowercase();
+    let host = host.strip_prefix("www.").unwrap_or(&host);
+    (!host.is_empty() && !host.contains(char::is_whitespace)).then(|| host.to_string())
 }
 
 fn open_private_window() {

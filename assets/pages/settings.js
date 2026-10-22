@@ -18,6 +18,9 @@
     customUrl.hidden = form.elements.engine.value !== 'custom';
   }
 
+  var sync = document.getElementById('sync');
+  sync.addEventListener('click', function () { sync.textContent = 'Syncing…'; });
+
   form.addEventListener('input', refresh);
   form.addEventListener('change', refresh);
 })();

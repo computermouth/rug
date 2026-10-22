@@ -17,6 +17,7 @@
 }
 
 :root[data-theme="dark"] {
+  color-scheme: dark;
   --bg: #18181b;
   --fg: #e4e4e7;
   --heading: #52525b;
@@ -248,7 +249,8 @@ button.primary:hover { background: var(--accent-hover); }
 .settings h2 { font-size: .85em; margin-bottom: 10px; }
 
 .cols { display: flex; gap: 48px; align-items: stretch; }
-.col { display: flex; flex-direction: column; min-width: 220px; }
+.col { display: flex; flex-direction: column; min-width: 220px; max-width: 280px; }
+.col .note { overflow-wrap: anywhere; }
 .col section { margin-bottom: 28px; }
 
 label { display: block; margin: 6px 0; font-size: .95em; cursor: pointer; }
@@ -283,4 +285,38 @@ button.dirty:hover { background: var(--accent-hover); }
 #apply { margin-top: auto; margin-bottom: 20px; }
 
 .msg { margin: 0 0 10px; font-size: .9em; color: green; }
+.msg:empty { display: none; }
+.error:empty { display: none; }
+.error { margin: 6px 0 0; font-size: .85em; color: #dc2626; }
+select {
+  width: 100%;
+  padding: 6px 8px;
+  font-size: .9em;
+  border: 1px solid var(--input-border);
+  border-radius: 4px;
+  background: var(--input-bg);
+  color: var(--fg);
+}
+.note a { color: inherit; text-decoration: underline; }
+
+/* passwords */
+
+.passwords-note { margin: 0 0 16px; }
+.list.passwords { width: 520px; }
+.passwords .username { margin-left: auto; color: var(--caption); font-size: .9em; }
+.passwords .remove { margin-left: 8px; }
+.add-login { width: 520px; margin-top: 28px; }
+.add-login h2 { font-size: .85em; margin-bottom: 4px; }
+.add-login .fields { display: flex; gap: 8px; align-items: center; }
+.add-login input { flex: 1; min-width: 0; margin-top: 0; }
+.add-login input[type="password"] {
+  box-sizing: border-box;
+  padding: 6px 8px;
+  font-size: .9em;
+  border: 1px solid var(--input-border);
+  border-radius: 4px;
+  background: var(--input-bg);
+  color: var(--fg);
+}
 .note { margin: 4px 0 0; font-size: .8em; color: var(--heading); }
+#sync { margin-top: 10px; }

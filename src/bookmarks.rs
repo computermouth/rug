@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{paths, store, urls};
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Bookmark {
     pub id: u64,
     pub parent: Option<u64>,
@@ -31,7 +31,6 @@ pub struct Folder {
 
 #[derive(Default, Serialize, Deserialize)]
 struct Bookmarks {
-    next_id: u64,
     items: Vec<Bookmark>,
 }
 
@@ -70,8 +69,7 @@ pub fn folders() -> Vec<Folder> {
 /// Adds a link, or a folder when `url` is `None`.
 pub fn add(parent: Option<u64>, title: &str, url: Option<&str>) {
     with(|b| {
-        let id = b.next_id;
-        b.next_id += 1;
+        let id = b.new_id();
         let url = url.map(normalize_url);
         let title = default_title(title, url.as_deref());
         let parent = b.valid_parent(parent, None);
@@ -129,7 +127,74 @@ pub fn delete(id: u64) {
     });
 }
 
+/// Three-way merge of bookmark files for git sync. Each entry takes
+/// whichever side changed it (ours if both did); deletions win over an
+/// untouched entry. Order comes from the side that reordered, ours if both.
+pub fn merge(base: &str, ours: &str, theirs: &str) -> String {
+    let parse = |json: &str| serde_json::from_str::<Bookmarks>(json).unwrap_or_default().items;
+    let (base, ours, theirs) = (parse(base), parse(ours), parse(theirs));
+    let find = |list: &[Bookmark], id: u64| list.iter().find(|i| i.id == id).cloned();
+
+    // Ids that both `list` and the base have, in `list`'s order.
+    let common_order = |list: &[Bookmark]| -> Vec<u64> {
+        list.iter().map(|i| i.id).filter(|&id| find(&base, id).is_some()).collect()
+    };
+    let base_order = |list: &[Bookmark]| -> Vec<u64> {
+        base.iter().map(|i| i.id).filter(|&id| find(list, id).is_some()).collect()
+    };
+    let ours_reordered = common_order(&ours) != base_order(&ours);
+    let theirs_reordered = common_order(&theirs) != base_order(&theirs);
+    let (first, second) = if theirs_reordered && !ours_reordered { (&theirs, &ours) } else { (&ours, &theirs) };
+
+    let mut merged = Bookmarks::default();
+    for id in first.iter().chain(second.iter()).map(|i| i.id) {
+        if merged.items.iter().any(|i| i.id == id) {
+            continue;
+        }
+        let kept = match (find(&base, id), find(&ours, id), find(&theirs, id)) {
+            (b, Some(o), Some(t)) => Some(if b.as_ref() == Some(&o) { t } else { o }),
+            (Some(b), Some(v), None) | (Some(b), None, Some(v)) => (v != b).then_some(v),
+            (None, Some(v), None) | (None, None, Some(v)) => Some(v),
+            (_, None, None) => None,
+        };
+        merged.items.extend(kept);
+    }
+
+    // Anything left in a deleted folder, or in a loop from both sides moving
+    // folders into each other, goes to the top level.
+    for i in 0..merged.items.len() {
+        let parent = merged.items[i].parent;
+        let orphaned = parent.is_some_and(|p| !merged.items.iter().any(|f| f.id == p && f.is_folder()));
+        if orphaned || merged.in_loop(parent) {
+            merged.items[i].parent = None;
+        }
+    }
+    serde_json::to_string_pretty(&merged).unwrap_or_default()
+}
+
 impl Bookmarks {
+    /// A random id, so entries added on different machines don't collide.
+    /// Kept within 2^53 for the pages' JavaScript.
+    fn new_id(&self) -> u64 {
+        loop {
+            let id = ((gtk::glib::random_int() as u64) << 21 ^ gtk::glib::random_int() as u64) & ((1 << 53) - 1);
+            if id != 0 && !self.items.iter().any(|i| i.id == id) {
+                return id;
+            }
+        }
+    }
+
+    /// Whether following parents up from `folder` never reaches the top level.
+    fn in_loop(&self, mut folder: Option<u64>) -> bool {
+        for _ in 0..=self.items.len() {
+            match folder {
+                Some(id) => folder = self.items.iter().find(|i| i.id == id).and_then(|i| i.parent),
+                None => return false,
+            }
+        }
+        true
+    }
+
     fn save(&self) {
         store::write_json(&paths::bookmarks_file(), self);
     }

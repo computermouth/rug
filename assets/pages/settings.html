@@ -47,6 +47,21 @@
       <p class="msg" {{cookies_msg_hidden}}>Cookies cleared. Takes effect after restart.</p>
       <a class="btn" href="rug://settings?clear_cookies=1">Clear Cookies</a>
     </section>
+  </div>
+  <div class="col">
+    <section>
+      <h2>🔑 Passwords</h2>
+      <select name="gpg_key" form="settings-form">{{key_options}}</select>
+      <p class="error" {{password_error_hidden}}>{{password_error}}</p>
+      <p class="note">Saved logins are encrypted to this GPG key.<br><a href="rug://passwords">Manage passwords</a></p>
+    </section>
+    <section>
+      <h2>🔄 Sync</h2>
+      <input type="text" name="remote" form="settings-form" value="{{remote}}" placeholder="git@host:you/rug-profile.git">
+      <p class="note">Git remote for {{profile_dir}}</p>
+      <p class="{{sync_class}}">{{sync_status}}</p>
+      <button id="sync" type="submit" form="settings-form" name="sync" value="1">Sync Now</button>
+    </section>
     <button id="apply" type="submit" form="settings-form" disabled>Apply Changes</button>
   </div>
 </div>

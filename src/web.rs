@@ -5,9 +5,17 @@ use std::cell::OnceCell;
 use gtk::prelude::*;
 use gtk::{gio, glib};
 use webkit6::prelude::*;
-use webkit6::{CacheModel, CookiePersistentStorage, Download, NetworkSession, WebContext, WebView};
+use webkit6::{
+    CacheModel, CookiePersistentStorage, Download, NetworkSession, UserContentInjectedFrames, UserContentManager,
+    UserScript, UserScriptInjectionTime, WebContext, WebView,
+};
 
 use crate::{pages, paths, store};
+
+/// The script world rug's injected page scripts run in, apart from the page's own.
+pub const SCRIPT_WORLD: &str = "rug";
+
+const AUTOFILL_JS: &str = include_str!("../assets/autofill.js");
 
 thread_local! {
     static SESSION: OnceCell<NetworkSession> = const { OnceCell::new() };
@@ -60,15 +68,46 @@ pub fn webview(page: Page) -> WebView {
         Page::Uri(uri) => uri,
     };
     let webview = SESSION.with(|s| {
-        WebView::builder().network_session(s.get().expect("web::init not called")).build()
+        WebView::builder()
+            .network_session(s.get().expect("web::init not called"))
+            .user_content_manager(&user_content())
+            .build()
     });
+    configure(&webview);
     webview.load_uri(&uri);
     webview
 }
 
 /// A view sharing `view`'s session and process, as WebKit wants for popups.
 pub fn related(view: &WebView) -> WebView {
-    WebView::builder().related_view(view).build()
+    let webview = WebView::builder().related_view(view).user_content_manager(&user_content()).build();
+    configure(&webview);
+    webview
+}
+
+/// Each view gets its own, so script messages say which view they're from.
+/// Messages arrive as the `rug` script message.
+fn user_content() -> UserContentManager {
+    let content = UserContentManager::new();
+    content.add_script(&UserScript::for_world(
+        AUTOFILL_JS,
+        UserContentInjectedFrames::TopFrame,
+        UserScriptInjectionTime::End,
+        SCRIPT_WORLD,
+        &[],
+        &[],
+    ));
+    content.register_script_message_handler("rug", Some(SCRIPT_WORLD));
+    content
+}
+
+fn configure(webview: &WebView) {
+    if let Some(settings) = WebViewExt::settings(webview) {
+        // WebKitGTK animates each mouse-wheel notch separately, which judders
+        // as the animations restart; plain wheel scrolling is steadier.
+        // Touchpads still scroll smoothly since they send fine-grained deltas.
+        settings.set_enable_smooth_scrolling(false);
+    }
 }
 
 fn choose_download_destination(download: &Download, suggested_name: &str) -> bool {

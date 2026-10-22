@@ -8,8 +8,9 @@ use webkit6::prelude::*;
 use webkit6::{ContextMenu, ContextMenuAction, ContextMenuItem, HitTestResult, LoadEvent, WebView};
 
 use crate::bookmark_dialog::BookmarkDialog;
-use crate::store;
+use crate::passwords::{self, Login};
 use crate::web::{self, Page};
+use crate::{store, urls};
 use crate::window::BrowserWindow;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -30,6 +31,18 @@ pub enum TabMsg {
     TitleChanged,
     MutedChanged,
     FaviconChanged,
+    /// The page's login form was submitted.
+    LoginSubmitted { username: String, password: String },
+}
+
+/// A submitted login rug could save.
+#[derive(Debug)]
+pub struct SaveOffer {
+    pub login: Login,
+    pub password: String,
+    pub url: String,
+    /// Whether it replaces a saved login.
+    pub update: bool,
 }
 
 #[derive(Debug)]
@@ -40,6 +53,7 @@ pub enum TabOutput {
     OpenInNewWindow(Page),
     Close(TabId),
     CloseOthers(TabId),
+    OfferSave(TabId, SaveOffer),
 }
 
 relm4::new_action_group!(TabActions, "tab");
@@ -59,6 +73,28 @@ impl Tab {
             label.insert_str(0, "(Private) ");
         }
         label
+    }
+
+    /// What to offer saving after a login, unless it's already saved or
+    /// the user said never to for this site.
+    fn save_offer(&self, username: String, password: String) -> Option<SaveOffer> {
+        let url = self.webview.uri()?.to_string();
+        let (_, host) = urls::origin(&url).filter(|_| url.starts_with("http"))?;
+        let host = host.strip_prefix("www.").unwrap_or(host);
+        if store::is_private()
+            || password.is_empty()
+            || store::settings().never_save.iter().any(|h| h == host)
+            || passwords::was_filled(host, &username, &password)
+        {
+            return None;
+        }
+        let existing = passwords::logins(host).into_iter().find(|l| l.username == username);
+        Some(SaveOffer {
+            update: existing.is_some(),
+            login: existing.unwrap_or_else(|| Login::new(host, &username)),
+            password,
+            url,
+        })
     }
 
     fn set_favicon(&mut self, texture: gdk::Texture) {
@@ -218,6 +254,22 @@ impl SimpleComponent for Tab {
                 false
             }
         ));
+        if let Some(content) = webview.user_content_manager() {
+            content.connect_script_message_received(Some("rug"), glib::clone!(
+                #[strong] sender,
+                move |_, message| {
+                    #[derive(serde::Deserialize)]
+                    struct Submitted {
+                        username: String,
+                        password: String,
+                    }
+                    let json = message.to_json(0).unwrap_or_default();
+                    if let Ok(Submitted { username, password }) = serde_json::from_str(&json) {
+                        sender.input(TabMsg::LoginSubmitted { username, password });
+                    }
+                }
+            ));
+        }
         webview.connect_create(|webview, _| {
             let popup = web::related(webview);
             BrowserWindow::open(Page::Adopt(popup.clone()));
@@ -248,6 +300,11 @@ impl SimpleComponent for Tab {
                 Some(texture) => self.set_favicon(texture),
                 None => self.favicon = store::placeholder_favicon(),
             },
+            TabMsg::LoginSubmitted { username, password } => {
+                if let Some(offer) = self.save_offer(username, password) {
+                    let _ = sender.output(TabOutput::OfferSave(self.id, offer));
+                }
+            }
         }
     }
 

@@ -1,16 +1,17 @@
 //! A browser window: navigation bar, progress bar and a notebook of tabs.
 
 use gtk::gdk::Key;
-use gtk::glib;
 use gtk::prelude::*;
+use gtk::{gio, glib};
 use relm4::prelude::*;
 use webkit6::prelude::*;
 use webkit6::{LoadEvent, WebView};
 
 use crate::completion::{Completion, CompletionMsg, CompletionOutput};
-use crate::tab::{Tab, TabId, TabOutput};
+use crate::passwords::{self, Login};
+use crate::tab::{SaveOffer, Tab, TabId, TabOutput};
 use crate::web::{self, Page};
-use crate::{store, urls};
+use crate::{store, sync, urls};
 
 struct TabHandle {
     id: TabId,
@@ -32,6 +33,15 @@ pub struct BrowserWindow {
     can_go_back: bool,
     can_go_forward: bool,
     progress: f64,
+    /// The 🔑 button for filling saved logins, and its popover.
+    key_button: gtk::MenuButton,
+    key_popover: gtk::Popover,
+    /// Saved logins for the active tab's site.
+    logins: Vec<Login>,
+    /// A just-submitted login to offer saving.
+    offer: Option<SaveOffer>,
+    /// An error to show in the key popover.
+    key_error: Option<String>,
 }
 
 #[derive(Debug)]
@@ -48,6 +58,14 @@ pub enum WindowMsg {
     Back,
     Forward,
     Reload,
+    OfferSave(TabId, SaveOffer),
+    Fill(Login),
+    Filled(Login, Result<String, String>),
+    SaveLogin,
+    SavedLogin(Result<(), String>),
+    NeverSave,
+    DismissOffer,
+    ManagePasswords,
 }
 
 impl BrowserWindow {
@@ -74,7 +92,81 @@ impl BrowserWindow {
         if sync_uri {
             self.uri = webview.uri().unwrap_or_default().into();
             self.sync_uri = true;
+            self.logins = self.host().map(|h| passwords::logins(&h)).unwrap_or_default();
         }
+    }
+
+    /// The active tab's host, for web pages.
+    fn host(&self) -> Option<String> {
+        let uri = self.active()?.webview.uri()?;
+        let (_, host) = urls::origin(&uri).filter(|_| uri.starts_with("http"))?;
+        Some(host.to_string())
+    }
+
+    /// Rebuilds the key popover: the pending save offer, or the saved logins.
+    fn refresh_key_popover(&self, sender: &ComponentSender<Self>) {
+        let content = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        content.set_margin_top(6);
+        content.set_margin_bottom(6);
+        content.set_margin_start(6);
+        content.set_margin_end(6);
+        let button = |label: &str, msg: fn() -> WindowMsg| {
+            let button = gtk::Button::with_label(label);
+            button.connect_clicked(glib::clone!(#[strong] sender, move |_| sender.input(msg())));
+            button
+        };
+
+        if let Some(error) = &self.key_error {
+            let label = gtk::Label::builder().label(error).wrap(true).max_width_chars(40).xalign(0.0).build();
+            label.add_css_class("error");
+            content.append(&label);
+        }
+
+        if let Some(offer) = &self.offer {
+            let who = if offer.login.username.is_empty() { "the password" } else { &offer.login.username };
+            let question = format!(
+                "{} {who} for {}?",
+                if offer.update { "Update the saved password for" } else { "Save" },
+                offer.login.host,
+            );
+            content.append(&gtk::Label::builder().label(question).wrap(true).max_width_chars(40).xalign(0.0).build());
+            let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+            buttons.set_halign(gtk::Align::End);
+            buttons.set_margin_top(6);
+            buttons.append(&button("Never for This Site", || WindowMsg::NeverSave));
+            buttons.append(&button("Not Now", || WindowMsg::DismissOffer));
+            let save = button(if offer.update { "Update" } else { "Save" }, || WindowMsg::SaveLogin);
+            save.add_css_class("suggested-action");
+            buttons.append(&save);
+            content.append(&buttons);
+        } else {
+            for login in &self.logins {
+                let name = if login.username.is_empty() { "(no username)" } else { &login.username };
+                let label = match self.host() {
+                    Some(host) if host.trim_start_matches("www.") != login.host => format!("{name} ({})", login.host),
+                    _ => name.to_string(),
+                };
+                let fill = gtk::Button::with_label(&label);
+                fill.set_has_frame(false);
+                fill.set_tooltip_text(Some("Fill in this login"));
+                fill.connect_clicked(glib::clone!(
+                    #[strong] sender, #[strong] login,
+                    move |_| sender.input(WindowMsg::Fill(login.clone()))
+                ));
+                content.append(&fill);
+            }
+            content.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+            let manage = button("Manage Passwords…", || WindowMsg::ManagePasswords);
+            manage.set_has_frame(false);
+            content.append(&manage);
+        }
+        self.key_popover.set_child(Some(&content));
+    }
+
+    /// Opens the key popover once the button is showing.
+    fn show_key_popover(&self) {
+        let button = self.key_button.clone();
+        glib::idle_add_local_once(move || button.popup());
     }
 
     fn load(&mut self, uri: &str) {
@@ -99,6 +191,7 @@ impl BrowserWindow {
             TabOutput::OpenInNewWindow(page) => WindowMsg::NewWindow(page),
             TabOutput::Close(id) => WindowMsg::CloseTab(id),
             TabOutput::CloseOthers(id) => WindowMsg::CloseOtherTabs(id),
+            TabOutput::OfferSave(id, offer) => WindowMsg::OfferSave(id, offer),
         });
 
         let child = controller.widget();
@@ -171,6 +264,14 @@ impl Component for BrowserWindow {
                             set_text: &model.uri,
                             connect_activate => WindowMsg::Go,
                         },
+                        #[local_ref]
+                        key_button -> gtk::MenuButton {
+                            set_label: "🔑",
+                            set_tooltip_text: Some("Saved passwords"),
+                            set_popover: Some(key_popover),
+                            #[watch]
+                            set_visible: !model.logins.is_empty() || model.offer.is_some(),
+                        },
                         gtk::Button {
                             set_label: "Go",
                             connect_clicked => WindowMsg::Go,
@@ -212,9 +313,16 @@ impl Component for BrowserWindow {
             can_go_back: false,
             can_go_forward: false,
             progress: 0.0,
+            key_button: gtk::MenuButton::new(),
+            key_popover: gtk::Popover::new(),
+            logins: Vec::new(),
+            offer: None,
+            key_error: None,
         };
         let notebook = &model.notebook;
         let url_bar = &model.url_bar;
+        let key_button = &model.key_button;
+        let key_popover = &model.key_popover;
         let widgets = view_output!();
 
         let new_tab = gtk::Button::builder().label("+").has_frame(false).build();
@@ -236,12 +344,14 @@ impl Component for BrowserWindow {
         model.url_bar.add_controller(focus);
 
         model.add_tab(page, &sender);
+        model.refresh_key_popover(&sender);
 
         ComponentParts { model, widgets }
     }
 
     fn update(&mut self, msg: Self::Input, sender: ComponentSender<Self>, root: &Self::Root) {
         self.sync_uri = false;
+        let refresh_popover = !matches!(msg, WindowMsg::TabProgress(_));
         match msg {
             WindowMsg::NewTab(page) => self.add_tab(page, &sender),
             WindowMsg::NewWindow(page) => Self::open(page),
@@ -257,7 +367,11 @@ impl Component for BrowserWindow {
                     self.remove_tab(other);
                 }
             }
-            WindowMsg::TabSwitched => self.sync_nav(true),
+            WindowMsg::TabSwitched => {
+                self.offer = None;
+                self.key_error = None;
+                self.sync_nav(true);
+            }
             WindowMsg::TabLoadChanged(id, event) => {
                 if self.is_active(id) {
                     if event == LoadEvent::Started {
@@ -294,6 +408,82 @@ impl Component for BrowserWindow {
                     tab.webview.reload();
                 }
             }
+            WindowMsg::OfferSave(id, offer) => {
+                if self.is_active(id) {
+                    self.offer = Some(offer);
+                    self.key_error = None;
+                    self.show_key_popover();
+                }
+            }
+            WindowMsg::Fill(login) => {
+                self.key_popover.popdown();
+                let decrypting = login.clone();
+                relm4::spawn_local(glib::clone!(
+                    #[strong] sender,
+                    async move {
+                        let result = gio::spawn_blocking(move || passwords::decrypt(&decrypting))
+                            .await
+                            .unwrap_or_else(|_| Err("gpg crashed".into()));
+                        sender.input(WindowMsg::Filled(login, result));
+                    }
+                ));
+            }
+            WindowMsg::Filled(login, Ok(password)) => {
+                // Only into the site it's for, in case the tab moved on.
+                let Some(tab) = self.active().filter(|_| self.host().is_some_and(|h| login.matches(&h))) else {
+                    return;
+                };
+                let script = format!(
+                    "rugFill({}, {})",
+                    serde_json::to_string(&login.username).unwrap_or_default(),
+                    serde_json::to_string(&password).unwrap_or_default(),
+                );
+                tab.webview.evaluate_javascript(&script, Some(web::SCRIPT_WORLD), None, None::<&gio::Cancellable>, |_| {});
+                passwords::remember_filled(&login, &password);
+                self.key_error = None;
+            }
+            WindowMsg::Filled(_, Err(error)) => {
+                self.key_error = Some(format!("Couldn't decrypt the password: {error}"));
+                self.show_key_popover();
+            }
+            WindowMsg::SaveLogin => {
+                let Some(offer) = self.offer.take() else { return };
+                self.key_popover.popdown();
+                relm4::spawn_local(glib::clone!(
+                    #[strong] sender,
+                    async move {
+                        let result = gio::spawn_blocking(move || passwords::save(&offer.login, &offer.password, &offer.url))
+                            .await
+                            .unwrap_or_else(|_| Err("gpg crashed".into()));
+                        sender.input(WindowMsg::SavedLogin(result));
+                    }
+                ));
+            }
+            WindowMsg::SavedLogin(result) => {
+                sync::sync_soon();
+                self.logins = self.host().map(|h| passwords::logins(&h)).unwrap_or_default();
+                if let Err(error) = result {
+                    self.key_error = Some(format!("Couldn't save the password: {error}"));
+                    self.show_key_popover();
+                }
+            }
+            WindowMsg::NeverSave => {
+                if let Some(offer) = self.offer.take() {
+                    store::update_settings(|s| s.never_save.push(offer.login.host));
+                }
+                self.key_popover.popdown();
+            }
+            WindowMsg::DismissOffer => {
+                self.offer = None;
+                self.key_popover.popdown();
+            }
+            WindowMsg::ManagePasswords => {
+                self.key_popover.popdown();
+                self.add_tab(Page::Uri(crate::pages::PASSWORDS.into()), &sender);
+            }
+        }
+        if refresh_popover {
+            self.refresh_key_popover(&sender);
         }
     }
 }

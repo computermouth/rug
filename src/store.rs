@@ -43,11 +43,13 @@ pub struct Settings {
     pub custom_url: String,
     pub dark: bool,
     pub cache: bool,
+    /// Hosts never to offer saving passwords for.
+    pub never_save: Vec<String>,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { engine: Engine::Ddg, custom_url: String::new(), dark: false, cache: true }
+        Self { engine: Engine::Ddg, custom_url: String::new(), dark: false, cache: true, never_save: Vec::new() }
     }
 }
 
@@ -68,33 +70,79 @@ impl Settings {
 pub struct Visit {
     pub url: String,
     pub title: String,
-    /// PNG data URI, so favicons survive restarts.
-    favicon: Option<String>,
+    /// Milliseconds since the epoch; 0 for visits from before times were kept.
+    time: u64,
+    /// PNG data URI from older files, which kept favicons in the history.
+    legacy_favicon: Option<String>,
 }
 
-/// On-disk shape of a [`Visit`]: `[url, title, favicon]`, or `[url, title]`
-/// from before favicons were stored.
+/// On-disk shape of a [`Visit`]: `[url, title, time]`, or from older
+/// versions `[url, title, favicon]` and `[url, title]`.
 #[derive(Serialize, Deserialize)]
 #[serde(untagged)]
 enum StoredVisit {
-    Current(String, String, Option<String>),
+    Current(String, String, u64),
+    WithFavicon(String, String, Option<String>),
     Legacy(String, String),
 }
 
 impl From<StoredVisit> for Visit {
     fn from(v: StoredVisit) -> Self {
-        let (url, title, favicon) = match v {
-            StoredVisit::Current(u, t, f) => (u, t, f),
-            StoredVisit::Legacy(u, t) => (u, t, None),
+        let (url, title, time, legacy_favicon) = match v {
+            StoredVisit::Current(u, t, time) => (u, t, time, None),
+            StoredVisit::WithFavicon(u, t, f) => (u, t, 0, f),
+            StoredVisit::Legacy(u, t) => (u, t, 0, None),
         };
-        Self { url, title, favicon }
+        Self { url, title, time, legacy_favicon }
     }
 }
 
 impl From<Visit> for StoredVisit {
     fn from(v: Visit) -> Self {
-        Self::Current(v.url, v.title, v.favicon)
+        Self::Current(v.url, v.title, v.time)
     }
+}
+
+fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
+}
+
+/// Parses a history file, giving undated visits from older versions
+/// distinct times in their original (most recent first) order.
+fn parse_history(json: &str) -> Vec<Visit> {
+    let mut history: Vec<Visit> = serde_json::from_str(json).unwrap_or_default();
+    let len = history.len() as u64;
+    for (i, v) in history.iter_mut().enumerate() {
+        if v.time == 0 {
+            v.time = len - i as u64;
+        }
+    }
+    history
+}
+
+/// Three-way merge of history files for git sync: visits from both sides,
+/// minus those one side deleted (unless the other has visited them since).
+pub fn merge_history(base: &str, ours: &str, theirs: &str) -> String {
+    let (base, ours, theirs) = (parse_history(base), parse_history(ours), parse_history(theirs));
+    let find = |list: &[Visit], url: &str| list.iter().find(|v| v.url == url).cloned();
+    let mut merged: Vec<Visit> = Vec::new();
+    for url in ours.iter().chain(&theirs).map(|v| v.url.clone()) {
+        if merged.iter().any(|v| v.url == url) {
+            continue;
+        }
+        let kept = match (find(&base, &url), find(&ours, &url), find(&theirs, &url)) {
+            (_, Some(o), Some(t)) => Some(if t.time > o.time { t } else { o }),
+            (Some(b), Some(v), None) | (Some(b), None, Some(v)) => (v.time > b.time).then_some(v),
+            (None, Some(v), None) | (None, None, Some(v)) => Some(v),
+            (_, None, None) => None,
+        };
+        merged.extend(kept);
+    }
+    merged.sort_by_key(|v| std::cmp::Reverse(v.time));
+    merged.truncate(MAX_HISTORY);
+    serde_json::to_string(&merged).unwrap_or_default()
 }
 
 #[derive(Default)]
@@ -103,7 +151,8 @@ struct Store {
     settings: Settings,
     /// Most recent first.
     history: Vec<Visit>,
-    favicons: HashMap<String, gdk::Texture>,
+    /// Favicons by page URL, with the data URI they're saved as.
+    favicons: HashMap<String, (gdk::Texture, String)>,
 }
 
 thread_local! {
@@ -118,13 +167,21 @@ fn with<R>(f: impl FnOnce(&mut Store) -> R) -> R {
 /// Loads settings and (outside private mode) history from disk.
 pub fn init(private: bool) {
     let settings = read_json(&paths::settings_file()).unwrap_or_default();
-    let history: Vec<Visit> =
-        if private { Vec::new() } else { read_json(&paths::history_file()).unwrap_or_default() };
-    let favicons = history
+    let history =
+        if private { Vec::new() } else { parse_history(&std::fs::read_to_string(paths::history_file()).unwrap_or_default()) };
+    let stored: HashMap<String, String> = read_json(&paths::favicons_file()).unwrap_or_default();
+    let legacy = history.iter().filter_map(|v| Some((&v.url, v.legacy_favicon.as_ref()?)));
+    let favicons = stored
         .iter()
-        .filter_map(|v| Some((v.url.clone(), texture_from_data_uri(v.favicon.as_deref()?)?)))
+        .chain(legacy)
+        .filter_map(|(url, data)| Some((url.clone(), (texture_from_data_uri(data)?, data.clone()))))
         .collect();
     with(|s| *s = Store { private, settings, history, favicons });
+}
+
+/// Re-reads everything from disk, e.g. after a sync brought in changes.
+pub fn reload() {
+    init(is_private());
 }
 
 pub fn is_private() -> bool {
@@ -163,9 +220,11 @@ pub fn record_visit(url: &str, title: &str) {
             None => Visit {
                 url: url.to_string(),
                 title: if title.is_empty() { url } else { title }.to_string(),
-                favicon: None,
+                time: 0,
+                legacy_favicon: None,
             },
         };
+        let visit = Visit { time: now(), ..visit };
         s.history.insert(0, visit);
         s.history.truncate(MAX_HISTORY);
         s.save_history();
@@ -177,11 +236,8 @@ pub fn record_favicon(url: &str, texture: &gdk::Texture) {
         if s.private || !is_tracked(url) {
             return;
         }
-        if let Some(v) = s.history.iter_mut().find(|v| v.url == url) {
-            v.favicon = Some(texture_to_data_uri(texture));
-        }
-        s.favicons.insert(url.to_string(), texture.clone());
-        s.save_history();
+        s.favicons.insert(url.to_string(), (texture.clone(), texture_to_data_uri(texture)));
+        s.save_favicons();
     });
 }
 
@@ -190,6 +246,7 @@ pub fn clear_history() {
         s.history.clear();
         s.favicons.clear();
         s.save_history();
+        s.save_favicons();
     });
 }
 
@@ -211,6 +268,7 @@ fn forget(matches: impl Fn(&Visit) -> bool) {
             s.favicons.remove(&v.url);
         }
         s.save_history();
+        s.save_favicons();
     });
 }
 
@@ -249,7 +307,7 @@ pub fn top_sites(max: usize) -> Vec<(String, String)> {
 
 /// The stored favicon for `url`, or a gray placeholder.
 pub fn favicon(url: &str) -> gdk::Texture {
-    with(|s| s.favicons.get(url).cloned()).unwrap_or_else(placeholder_favicon)
+    with(|s| s.favicons.get(url).map(|(t, _)| t.clone())).unwrap_or_else(placeholder_favicon)
 }
 
 pub fn placeholder_favicon() -> gdk::Texture {
@@ -259,6 +317,16 @@ pub fn placeholder_favicon() -> gdk::Texture {
 impl Store {
     fn save_history(&self) {
         write_json(&paths::history_file(), &self.history);
+    }
+
+    fn save_favicons(&self) {
+        let favicons: HashMap<&String, &String> = self
+            .favicons
+            .iter()
+            .filter(|(url, _)| self.history.iter().any(|v| &v.url == *url))
+            .map(|(url, (_, data))| (url, data))
+            .collect();
+        write_json(&paths::favicons_file(), &favicons);
     }
 }
 
@@ -270,8 +338,13 @@ pub(crate) fn write_json<T: Serialize + ?Sized>(path: &Path, value: &T) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    if let Ok(json) = serde_json::to_string(value) {
+    if let Ok(json) = serde_json::to_string_pretty(value) {
         let _ = std::fs::write(path, json);
+    }
+    if path == paths::bookmarks_file() {
+        crate::sync::sync_soon();
+    } else if path.starts_with(paths::profile_dir()) {
+        crate::sync::changed();
     }
 }
 
