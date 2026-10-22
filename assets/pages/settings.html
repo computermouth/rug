@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="{{theme}}">
+<head>
+<meta charset="UTF-8">
+<title>settings</title>
+<link rel="stylesheet" href="rug://assets/rug.css">
+</head>
+<body class="settings">
+<a class="corner right" href="rug://home">Home</a>
+<h1>settings</h1>
+<div class="cols">
+  <form id="settings-form" class="col" method="get" action="rug://settings">
+    <section>
+      <h2>Search</h2>
+      <label><input type="radio" name="engine" value="ddg" {{ddg}}> DuckDuckGo</label>
+      <label><input type="radio" name="engine" value="google" {{google}}> Google</label>
+      <label><input type="radio" name="engine" value="bing" {{bing}}> Bing</label>
+      <label><input type="radio" name="engine" value="custom" {{custom}}> Custom</label>
+      <input id="custom-url" type="text" name="custom_url" value="{{custom_url}}"
+             placeholder="https://example.com/search?q=" {{custom_url_hidden}}>
+    </section>
+    <section>
+      <h2>Theme</h2>
+      <label><input type="radio" name="theme" value="light" {{light}}> Light</label>
+      <label><input type="radio" name="theme" value="dark" {{dark}}> Dark</label>
+    </section>
+    <section>
+      <h2>Cache</h2>
+      <label><input type="radio" name="cache" value="enabled" {{cache_enabled}}> Enabled</label>
+      <label><input type="radio" name="cache" value="disabled" {{cache_disabled}}> Disabled</label>
+      <p class="note">Takes effect on next launch.</p>
+    </section>
+  </form>
+  <div class="col">
+    <section>
+      <h2>History</h2>
+      <p class="msg" {{history_msg_hidden}}>History cleared.</p>
+      <a class="btn" href="rug://settings?clear=1">Clear History</a>
+    </section>
+    <section>
+      <h2>Cache Data</h2>
+      <p class="msg" {{cache_msg_hidden}}>Cache cleared.</p>
+      <a class="btn" href="rug://settings?clear_cache=1">Clear Cache</a>
+    </section>
+    <section>
+      <h2>Cookies</h2>
+      <p class="msg" {{cookies_msg_hidden}}>Cookies cleared. Takes effect after restart.</p>
+      <a class="btn" href="rug://settings?clear_cookies=1">Clear Cookies</a>
+    </section>
+    <button id="apply" type="submit" form="settings-form" disabled>Apply Changes</button>
+  </div>
+</div>
+<script src="rug://assets/settings.js"></script>
+</body>
+</html>
