@@ -1,3 +1,5 @@
+mod bookmark_dialog;
+mod bookmarks;
 mod completion;
 mod pages;
 mod paths;
@@ -27,6 +29,7 @@ fn main() {
     app.allow_multiple_instances(true);
 
     store::init(private);
+    bookmarks::init();
     apply_theme(private || store::settings().dark);
     relm4::set_global_css(include_str!("../assets/gtk.css"));
     web::init();

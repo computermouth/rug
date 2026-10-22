@@ -4,21 +4,30 @@
 <meta charset="UTF-8">
 <title>home</title>
 <link rel="stylesheet" href="rug://assets/rug.css">
-<script src="rug://assets/home.js"></script>
+<script src="rug://assets/favicons.js"></script>
 </head>
 <body>
-<a class="corner left" href="rug://private">Private Browsing</a>
-<a class="corner right" href="rug://settings">Settings</a>
+<a class="corner left" href="rug://private">🕶️ Private Browsing</a>
+<a class="corner right" href="rug://settings">⚙️ Settings</a>
 <h1>rug</h1>
 <div class="main">
-  <section>
-    <h2>Favorites</h2>
-    <div class="grid">{{favorites}}</div>
+  <section class="bookmarks">
+    <div class="section-head">
+      <h2><a href="rug://bookmarks">⭐ Bookmarks</a></h2>
+      <button class="small" data-bookmark="add">＋ Add</button>
+    </div>
+    <ul class="list">{{bookmarks}}</ul>
   </section>
   <section>
-    <h2>Recent</h2>
-    <ul class="recent">{{recent}}</ul>
+    <div class="section-head"><h2>🔥 Frequent</h2></div>
+    <div class="grid">{{frequent}}</div>
+  </section>
+  <section class="recent">
+    <div class="section-head"><h2>🕘 Recent</h2></div>
+    <ul class="list">{{recent}}</ul>
   </section>
 </div>
+{{bookmark_dialog}}
+<script src="rug://assets/bookmarks.js"></script>
 </body>
 </html>

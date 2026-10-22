@@ -130,16 +130,14 @@ impl Component for BrowserWindow {
 
     view! {
         gtk::ApplicationWindow {
-            set_default_size: (800, 600),
+            set_default_size: (1100, 750),
             set_title: Some(if store::is_private() { "rug — private browsing" } else { "rug" }),
             set_visible: true,
 
             add_controller = gtk::EventControllerKey {
                 connect_key_pressed[sender] => move |_, key, _, _| {
-                    match key {
-                        Key::Escape => std::process::exit(0),
-                        Key::F5 => sender.input(WindowMsg::Reload),
-                        _ => {}
+                    if key == Key::F5 {
+                        sender.input(WindowMsg::Reload);
                     }
                     glib::Propagation::Proceed
                 },

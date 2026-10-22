@@ -1,0 +1,21 @@
+<dialog id="bookmark-dialog">
+  <form method="get" action="rug://bookmarks">
+    <h2 class="dialog-title">Add Bookmark</h2>
+    <input type="hidden" name="action">
+    <input type="hidden" name="kind">
+    <input type="hidden" name="id">
+    <input type="hidden" name="return" value="{{return}}">
+    <label>Name <input type="text" name="title"></label>
+    <label class="url-field">URL <input type="text" name="url" placeholder="https://"></label>
+    <label>Folder
+      <select name="parent">
+        <option value="" data-path="">Bookmarks</option>
+        {{folder_options}}
+      </select>
+    </label>
+    <div class="buttons">
+      <button type="button" class="cancel">Cancel</button>
+      <button type="submit" class="primary">Save</button>
+    </div>
+  </form>
+</dialog>

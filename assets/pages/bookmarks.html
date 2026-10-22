@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="{{theme}}">
+<head>
+<meta charset="UTF-8">
+<title>bookmarks</title>
+<link rel="stylesheet" href="rug://assets/rug.css">
+<script src="rug://assets/favicons.js"></script>
+</head>
+<body>
+<a class="corner right" href="rug://home">🏠 Home</a>
+<h1>bookmarks</h1>
+<div class="toolbar">
+  <button data-bookmark="add">＋ Bookmark</button>
+  <button data-bookmark="add-folder">📁 New Folder</button>
+</div>
+<ul class="tree">{{tree}}</ul>
+{{bookmark_dialog}}
+<script src="rug://assets/bookmarks.js"></script>
+</body>
+</html>

@@ -56,6 +56,8 @@ h2 {
 
 a { color: var(--fg); text-decoration: none; }
 
+[hidden] { display: none !important; }
+
 .corner {
   position: fixed;
   top: 16px;
@@ -71,16 +73,32 @@ a { color: var(--fg); text-decoration: none; }
 .main { display: flex; gap: 32px; align-items: flex-start; }
 .main section { display: flex; flex-direction: column; }
 
+.section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 26px;
+  margin-bottom: 8px;
+}
+.section-head h2 { margin: 0; }
+.section-head h2 a { color: inherit; }
+.section-head h2 a:hover { color: var(--fg); }
+
+button.small { padding: 3px 10px; font-size: .75em; }
+
 .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; width: 240px; }
 .tile {
+  position: relative;
+  min-width: 0;
+  border-radius: 14px;
+  background: var(--surface);
+}
+.tile > a:first-child {
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 5px;
-  min-width: 0;
   padding: 10px 4px 8px;
-  border-radius: 14px;
-  background: var(--surface);
 }
 .tile:hover { background: var(--surface-hover); }
 .tile img { width: 24px; height: 24px; }
@@ -94,19 +112,123 @@ a { color: var(--fg); text-decoration: none; }
   white-space: nowrap;
 }
 
-.recent {
+.list {
   list-style: none;
-  width: 320px;
+  width: 260px;
   margin: 0;
   padding: 4px;
   border: 4px solid var(--border);
   border-radius: 6px;
 }
-.recent li { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 4px; }
-.recent li:hover { background: var(--surface); }
-.recent img { width: 16px; height: 16px; flex-shrink: 0; }
-.recent a { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.recent a:hover { text-decoration: underline; }
+.recent .list { width: 320px; }
+.list:empty::after {
+  content: "Nothing here yet";
+  display: block;
+  padding: 6px 8px;
+  font-size: .85em;
+  color: var(--heading);
+}
+.list li { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 4px; }
+.list li:hover { background: var(--surface); }
+.list img, .tree img { width: 16px; height: 16px; flex-shrink: 0; }
+.list .icon { width: 16px; font-size: 13px; text-align: center; flex-shrink: 0; }
+.list a { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.list a:hover { text-decoration: underline; }
+
+/* × on Frequent tiles and Recent rows, shown on hover. */
+.remove {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  line-height: 18px;
+  border-radius: 50%;
+  text-align: center;
+  font-size: 14px;
+  color: var(--heading);
+  visibility: hidden;
+}
+.remove:hover { background: var(--border); color: var(--fg); text-decoration: none !important; }
+.tile:hover .remove, .list li:hover .remove { visibility: visible; }
+.tile .remove { position: absolute; top: 2px; right: 2px; }
+.list .remove { margin-left: auto; }
+
+/* bookmarks */
+
+.toolbar { display: flex; gap: 8px; width: 640px; margin-bottom: 12px; }
+
+.tree, .tree ul { list-style: none; margin: 0; padding: 0; }
+.tree { width: 640px; padding-bottom: 48px; }
+.tree ul { padding-left: 22px; }
+.tree:empty::after, .tree ul:empty::after {
+  display: block;
+  padding: 6px 8px;
+  font-size: .85em;
+  font-style: italic;
+  color: var(--heading);
+}
+.tree:empty::after { content: "No bookmarks yet"; }
+.tree ul:empty::after { content: "Empty"; }
+
+.tree summary, .tree .link {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 24px;
+  padding: 4px 8px;
+  border-radius: 4px;
+}
+.tree summary { list-style: none; cursor: pointer; font-weight: 600; }
+.tree summary::-webkit-details-marker { display: none; }
+.tree summary::before { content: "📁"; width: 16px; font-size: 13px; text-align: center; }
+.tree details[open] > summary::before { content: "📂"; }
+.tree summary:hover, .tree .link:hover { background: var(--surface); }
+.tree .folder:target > details > summary { background: var(--surface-hover); }
+.tree .name, .tree .link a { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tree .link a:hover { text-decoration: underline; }
+.tree .host { flex-shrink: 0; font-size: .8em; color: var(--heading); }
+
+/* Drag to reorder: the dragged row fades, the drop spot gets an accent line
+   (before/after) or outline (into a folder). */
+/* No text selection, so pressing on a row and moving always drags it. */
+.tree li { -webkit-user-select: none; user-select: none; -webkit-user-drag: element; }
+.tree li.dragging { opacity: .4; }
+.tree .link.drop-before, .tree .folder.drop-before > details > summary { box-shadow: inset 0 2px 0 var(--accent); }
+.tree .link.drop-after { box-shadow: inset 0 -2px 0 var(--accent); }
+.tree .folder.drop-into > details > summary { box-shadow: inset 0 0 0 2px var(--accent); }
+.tree.drop-end { box-shadow: inset 0 -2px 0 var(--accent); }
+
+.actions { display: flex; gap: 2px; margin-left: auto; visibility: hidden; }
+.tree summary:hover .actions, .tree .link:hover .actions { visibility: visible; }
+.actions button { padding: 2px 6px; font-size: .8em; background: none; }
+.actions button:hover { background: var(--surface-hover); }
+
+dialog {
+  width: 340px;
+  padding: 20px 24px;
+  border: none;
+  border-radius: 10px;
+  background: var(--bg);
+  color: var(--fg);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, .35);
+}
+dialog::backdrop { background: rgba(0, 0, 0, .4); }
+dialog h2 { margin-bottom: 16px; }
+dialog label { margin: 12px 0 0; font-size: .8em; color: var(--heading); cursor: default; }
+dialog input[type="text"], dialog select {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  margin-top: 4px;
+  padding: 6px 8px;
+  font-size: 1.1em;
+  border: 1px solid var(--input-border);
+  border-radius: 4px;
+  background: var(--input-bg);
+  color: var(--fg);
+}
+dialog .buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
+button.primary { background: var(--accent); color: #fff; }
+button.primary:hover { background: var(--accent-hover); }
 
 .private-badge {
   margin-bottom: 2em;
@@ -142,7 +264,6 @@ input[type="text"] {
   background: var(--input-bg);
   color: var(--fg);
 }
-input[hidden] { display: none; }
 
 button, .btn {
   display: inline-block;

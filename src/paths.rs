@@ -33,3 +33,7 @@ pub fn webkit_cache_dir() -> PathBuf {
 pub fn cookies_file() -> PathBuf {
     webkit_data_dir().join("cookies.sqlite")
 }
+
+pub fn bookmarks_file() -> PathBuf {
+    pick(dev_dir(), glib::user_data_dir().join("rug")).join("bookmarks.json")
+}

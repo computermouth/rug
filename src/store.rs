@@ -193,6 +193,27 @@ pub fn clear_history() {
     });
 }
 
+/// Removes every visit to exactly `url`.
+pub fn forget_url(url: &str) {
+    forget(|v| v.url == url);
+}
+
+/// Removes every visit to any page on `host`.
+pub fn forget_host(host: &str) {
+    forget(|v| urls::origin(&v.url).is_some_and(|(_, h)| h == host));
+}
+
+fn forget(matches: impl Fn(&Visit) -> bool) {
+    with(|s| {
+        let (gone, kept): (Vec<Visit>, Vec<Visit>) = s.history.drain(..).partition(|v| matches(v));
+        s.history = kept;
+        for v in gone {
+            s.favicons.remove(&v.url);
+        }
+        s.save_history();
+    });
+}
+
 pub fn recent(max: usize) -> Vec<Visit> {
     with(|s| s.history.iter().take(max).cloned().collect())
 }
@@ -241,11 +262,11 @@ impl Store {
     }
 }
 
-fn read_json<T: DeserializeOwned>(path: &Path) -> Option<T> {
+pub(crate) fn read_json<T: DeserializeOwned>(path: &Path) -> Option<T> {
     serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
 }
 
-fn write_json<T: Serialize + ?Sized>(path: &Path, value: &T) {
+pub(crate) fn write_json<T: Serialize + ?Sized>(path: &Path, value: &T) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }

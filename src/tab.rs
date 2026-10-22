@@ -7,9 +7,10 @@ use relm4::prelude::*;
 use webkit6::prelude::*;
 use webkit6::{ContextMenu, ContextMenuAction, ContextMenuItem, HitTestResult, LoadEvent, WebView};
 
+use crate::bookmark_dialog::BookmarkDialog;
+use crate::store;
 use crate::web::{self, Page};
 use crate::window::BrowserWindow;
-use crate::store;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TabId(pub usize);
@@ -43,6 +44,7 @@ pub enum TabOutput {
 
 relm4::new_action_group!(TabActions, "tab");
 relm4::new_stateless_action!(OpenInWindowAction, TabActions, "open-in-window");
+relm4::new_stateless_action!(BookmarkAction, TabActions, "bookmark");
 relm4::new_stateful_action!(MuteAction, TabActions, "mute", (), bool);
 relm4::new_stateless_action!(CloseAction, TabActions, "close");
 relm4::new_stateless_action!(CloseOthersAction, TabActions, "close-others");
@@ -128,6 +130,7 @@ impl SimpleComponent for Tab {
         relm4::menu! {
             tab_menu: {
                 "Open in New Window" => OpenInWindowAction,
+                "Bookmark Tab…" => BookmarkAction,
                 section! {
                     "Mute Tab" => MuteAction,
                 },
@@ -161,6 +164,14 @@ impl SimpleComponent for Tab {
                     _ => Page::Home,
                 };
                 let _ = sender.output(TabOutput::OpenInNewWindow(page));
+            }
+        )));
+        actions.add_action(RelmAction::<BookmarkAction>::new_stateless(glib::clone!(
+            #[weak] webview, #[weak(rename_to = label)] widgets.label,
+            move |_| {
+                let title = webview.title().unwrap_or_default().to_string();
+                let uri = webview.uri().unwrap_or_default().to_string();
+                BookmarkDialog::builder().transient_for(&label).launch((title, uri)).detach_runtime();
             }
         )));
         actions.add_action(RelmAction::<MuteAction>::new_stateful(&false, glib::clone!(
